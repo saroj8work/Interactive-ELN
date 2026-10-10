@@ -1,0 +1,169 @@
+services:
+  identity-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: identity
+      POSTGRES_USER: identity
+      POSTGRES_PASSWORD: identity_dev_only
+    volumes:
+      - identity-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U identity -d identity"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  mailpit:
+    image: axllent/mailpit:v1.21
+    ports:
+      - "8025:8025"
+
+  identity-service:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.identity
+    environment:
+      IDENTITY_DATABASE_URL: postgresql+psycopg://identity:identity_dev_only@identity-db:5432/identity
+      ELN_JWT_SECRET: ${ELN_JWT_SECRET:?Set ELN_JWT_SECRET in .env}
+      ELN_BOOTSTRAP_TOKEN: ${ELN_BOOTSTRAP_TOKEN:?Set ELN_BOOTSTRAP_TOKEN in .env}
+      ELN_ENV: development
+      SMTP_HOST: mailpit
+      SMTP_PORT: 1025
+      SMTP_STARTTLS: "false"
+      SMTP_FROM: eln@localhost
+      PUBLIC_APP_URL: http://localhost:5173
+    depends_on:
+      identity-db:
+        condition: service_healthy
+      mailpit:
+        condition: service_started
+    ports:
+      - "8004:8004"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8004/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  projects-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: projects
+      POSTGRES_USER: projects
+      POSTGRES_PASSWORD: projects_dev_only
+    volumes:
+      - projects-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U projects -d projects"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  notebook-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: notebook
+      POSTGRES_USER: notebook
+      POSTGRES_PASSWORD: notebook_dev_only
+    volumes:
+      - notebook-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U notebook -d notebook"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  activity-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: activity
+      POSTGRES_USER: activity
+      POSTGRES_PASSWORD: activity_dev_only
+    volumes:
+      - activity-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U activity -d activity"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  activity-service:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.activity
+    environment:
+      DATABASE_URL: postgresql+psycopg://activity:activity_dev_only@activity-db:5432/activity
+    depends_on:
+      activity-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8003/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  projects-service:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.projects
+    environment:
+      DATABASE_URL: postgresql+psycopg://projects:projects_dev_only@projects-db:5432/projects
+      ACTIVITY_SERVICE_URL: http://activity-service:8003
+    depends_on:
+      projects-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  notebook-service:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.notebook
+    environment:
+      DATABASE_URL: postgresql+psycopg://notebook:notebook_dev_only@notebook-db:5432/notebook
+      ACTIVITY_SERVICE_URL: http://activity-service:8003
+      ELN_ATTACHMENT_DIR: /var/lib/eln-attachments
+    volumes:
+      - notebook-attachments:/var/lib/eln-attachments
+    depends_on:
+      notebook-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.gateway
+    environment:
+      ELN_JWT_SECRET: ${ELN_JWT_SECRET:?Set ELN_JWT_SECRET in .env}
+      PROJECTS_SERVICE_URL: http://projects-service:8001
+      NOTEBOOK_SERVICE_URL: http://notebook-service:8002
+      ACTIVITY_SERVICE_URL: http://activity-service:8003
+    depends_on:
+      projects-service:
+        condition: service_healthy
+      notebook-service:
+        condition: service_healthy
+      activity-service:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  identity-data:
+  projects-data:
+  notebook-data:
+  activity-data:
+  notebook-attachments:
