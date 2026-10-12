@@ -1,22 +1,25 @@
 from decimal import Decimal
-from datetime import datetime
+from datetime import datetime, timezone
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from .models import (
     Experiment,
+    AuditEvent,
     EntryAttachment,
     EntryRevision,
     EquipmentBooking,
     EquipmentResource,
     InventoryItem,
+    LabTask,
     NotebookEntry,
     NotebookTemplate,
+    RecordTag,
+    RecordSignature,
     Sample,
     StockMovement,
 )
-
 
 class NotebookRepository:
     def __init__(self, db: Session):
@@ -78,6 +81,179 @@ class NotebookRepository:
         self._db.flush()
         return entry
 
+    def get_record_project_id(
+        self, organization_id: int, entity_type: str, entity_id: int
+    ) -> int | None:
+        if entity_type == "experiment":
+            return self._db.scalar(
+                select(Experiment.project_id).where(
+                    Experiment.organization_id == organization_id,
+                    Experiment.id == entity_id,
+                )
+            )
+        if entity_type == "entry":
+            return self._db.scalar(
+                select(Experiment.project_id)
+                .join(NotebookEntry, NotebookEntry.experiment_id == Experiment.id)
+                .where(
+                    NotebookEntry.organization_id == organization_id,
+                    NotebookEntry.id == entity_id,
+                    Experiment.organization_id == organization_id,
+                )
+            )
+        if entity_type == "inventory":
+            return (
+                0
+                if self._db.scalar(
+                    select(InventoryItem.id).where(
+                        InventoryItem.organization_id == organization_id,
+                        InventoryItem.id == entity_id,
+                        InventoryItem.status == "active",
+                    )
+                )
+                is not None
+                else None
+            )
+        if entity_type == "sample":
+            return self._db.scalar(
+                select(Sample.project_id).where(
+                    Sample.organization_id == organization_id,
+                    Sample.id == entity_id,
+                    Sample.status == "active",
+                )
+            )
+        if entity_type == "equipment":
+            return (
+                0
+                if self._db.scalar(
+                    select(EquipmentResource.id).where(
+                        EquipmentResource.organization_id == organization_id,
+                        EquipmentResource.id == entity_id,
+                        EquipmentResource.status == "active",
+                    )
+                )
+                is not None
+                else None
+            )
+        if entity_type == "template":
+            return (
+                0
+                if self._db.scalar(
+                    select(NotebookTemplate.id).where(
+                        NotebookTemplate.organization_id == organization_id,
+                        NotebookTemplate.id == entity_id,
+                        NotebookTemplate.status == "active",
+                    )
+                )
+                is not None
+                else None
+            )
+        raise ValueError("Unsupported tag entity type.")
+
+    def record_tag_target(
+        self, organization_id: int, entity_type: str, entity_id: int
+    ) -> tuple[bool, int | None]:
+        if entity_type in {"experiment", "entry"}:
+            project_id = self.get_record_project_id(
+                organization_id, entity_type, entity_id
+            )
+            return project_id is not None, project_id
+        model = {
+            "inventory": InventoryItem,
+            "sample": Sample,
+            "equipment": EquipmentResource,
+            "template": NotebookTemplate,
+        }.get(entity_type)
+        if model is None:
+            return False, None
+        record = self._db.scalar(
+            select(model).where(
+                model.organization_id == organization_id,
+                model.id == entity_id,
+                model.status == "active",
+            )
+        )
+        if record is None:
+            return False, None
+        return True, getattr(record, "project_id", None)
+
+    def list_record_tags(
+        self, organization_id: int, entity_type: str, entity_id: int
+    ) -> list[str]:
+        return list(
+            self._db.scalars(
+                select(RecordTag.tag)
+                .where(
+                    RecordTag.organization_id == organization_id,
+                    RecordTag.entity_type == entity_type,
+                    RecordTag.entity_id == entity_id,
+                )
+                .order_by(RecordTag.tag)
+            )
+        )
+
+    def list_project_record_tags(
+        self, organization_id: int, project_id: int
+    ) -> dict[tuple[str, int], list[str]]:
+        experiment_ids = set(
+            self._db.scalars(
+                select(Experiment.id).where(
+                    Experiment.organization_id == organization_id,
+                    Experiment.project_id == project_id,
+                )
+            )
+        )
+        entry_ids = set(
+            self._db.scalars(
+                select(NotebookEntry.id)
+                .join(Experiment, NotebookEntry.experiment_id == Experiment.id)
+                .where(
+                    NotebookEntry.organization_id == organization_id,
+                    Experiment.organization_id == organization_id,
+                    Experiment.project_id == project_id,
+                )
+            )
+        )
+        tags: dict[tuple[str, int], list[str]] = {}
+        rows = self._db.execute(
+            select(RecordTag.entity_type, RecordTag.entity_id, RecordTag.tag).where(
+                RecordTag.organization_id == organization_id,
+                RecordTag.entity_type.in_(("experiment", "entry")),
+            )
+        )
+        for entity_type, entity_id, tag in rows:
+            allowed_ids = experiment_ids if entity_type == "experiment" else entry_ids
+            if entity_id in allowed_ids:
+                tags.setdefault((entity_type, entity_id), []).append(tag)
+        return tags
+
+    def replace_record_tags(
+        self,
+        organization_id: int,
+        entity_type: str,
+        entity_id: int,
+        user_id: int,
+        tags: list[str],
+    ) -> None:
+        self._db.execute(
+            delete(RecordTag).where(
+                RecordTag.organization_id == organization_id,
+                RecordTag.entity_type == entity_type,
+                RecordTag.entity_id == entity_id,
+            )
+        )
+        self._db.add_all(
+            RecordTag(
+                organization_id=organization_id,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                tag=tag,
+                created_by_user_id=user_id,
+            )
+            for tag in tags
+        )
+        self._db.flush()
+
     def next_revision_number(self, organization_id: int, entry_id: int) -> int:
         latest = self._db.scalar(
             select(func.max(EntryRevision.revision_number)).where(
@@ -121,7 +297,9 @@ class NotebookRepository:
         return list(
             self._db.scalars(
                 select(InventoryItem)
-                .where(InventoryItem.organization_id == organization_id)
+                .where(
+                    InventoryItem.organization_id == organization_id,
+                )
                 .order_by(InventoryItem.name, InventoryItem.id)
             )
         )
@@ -179,7 +357,9 @@ class NotebookRepository:
         return list(
             self._db.scalars(
                 select(Sample)
-                .where(Sample.organization_id == organization_id)
+                .where(
+                    Sample.organization_id == organization_id,
+                )
                 .order_by(Sample.created_at.desc(), Sample.id.desc())
             )
         )
@@ -188,6 +368,124 @@ class NotebookRepository:
         return self._db.scalar(
             select(Sample).where(
                 Sample.organization_id == organization_id, Sample.id == sample_id
+            )
+        )
+
+    def get_audit_head(self, organization_id: int) -> AuditEvent | None:
+        return self._db.scalar(
+            select(AuditEvent)
+            .where(AuditEvent.organization_id == organization_id)
+            .order_by(AuditEvent.id.desc())
+            .limit(1)
+        )
+
+    def add_audit_event(self, event: AuditEvent) -> AuditEvent:
+        self._db.add(event)
+        self._db.flush()
+        return event
+
+    def list_audit_events(self, organization_id: int) -> list[AuditEvent]:
+        return list(
+            self._db.scalars(
+                select(AuditEvent)
+                .where(AuditEvent.organization_id == organization_id)
+                .order_by(AuditEvent.id)
+            )
+        )
+
+    def list_signatures(
+        self, organization_id: int, entity_type: str, entity_id: int
+    ) -> list[RecordSignature]:
+        return list(
+            self._db.scalars(
+                select(RecordSignature)
+                .where(
+                    RecordSignature.organization_id == organization_id,
+                    RecordSignature.entity_type == entity_type,
+                    RecordSignature.entity_id == entity_id,
+                )
+                .order_by(RecordSignature.created_at, RecordSignature.id)
+            )
+        )
+
+    def add_signature(self, signature: RecordSignature) -> RecordSignature:
+        self._db.add(signature)
+        self._db.flush()
+        return signature
+
+    def get_signature(
+        self, organization_id: int, signature_id: int
+    ) -> RecordSignature | None:
+        return self._db.scalar(
+            select(RecordSignature).where(
+                RecordSignature.organization_id == organization_id,
+                RecordSignature.id == signature_id,
+            )
+        )
+
+    def get_resource(self, organization_id: int, entity_type: str, entity_id: int):
+        model = {
+            "inventory": InventoryItem,
+            "sample": Sample,
+            "equipment": EquipmentResource,
+            "template": NotebookTemplate,
+        }.get(entity_type)
+        if model is None:
+            raise ValueError("Unsupported resource type.")
+        return self._db.scalar(
+            select(model).where(
+                model.organization_id == organization_id, model.id == entity_id
+            )
+        )
+
+    def has_active_equipment_bookings(
+        self, organization_id: int, equipment_id: int
+    ) -> bool:
+        return (
+            self._db.scalar(
+                select(EquipmentBooking.id)
+                .where(
+                    EquipmentBooking.organization_id == organization_id,
+                    EquipmentBooking.equipment_id == equipment_id,
+                    EquipmentBooking.status == "reserved",
+                    EquipmentBooking.ends_at > datetime.now(timezone.utc),
+                )
+                .limit(1)
+            )
+            is not None
+        )
+
+    def list_tasks(self, organization_id: int, project_id: int) -> list[LabTask]:
+        return list(
+            self._db.scalars(
+                select(LabTask)
+                .where(
+                    LabTask.organization_id == organization_id,
+                    LabTask.project_id == project_id,
+                )
+                .order_by(LabTask.due_at.is_(None), LabTask.due_at, LabTask.id)
+            )
+        )
+
+    def get_task(self, organization_id: int, task_id: int) -> LabTask | None:
+        return self._db.scalar(
+            select(LabTask).where(
+                LabTask.organization_id == organization_id,
+                LabTask.id == task_id,
+            )
+        )
+
+    def add_task(self, task: LabTask) -> LabTask:
+        self._db.add(task)
+        self._db.flush()
+        return task
+
+    def list_organization_tasks(self, organization_id: int) -> list[LabTask]:
+        return list(
+            self._db.scalars(
+                select(LabTask)
+                .where(LabTask.organization_id == organization_id)
+                .order_by(LabTask.due_at.is_(None), LabTask.due_at, LabTask.id)
             )
         )
 
@@ -200,7 +498,9 @@ class NotebookRepository:
         return list(
             self._db.scalars(
                 select(NotebookTemplate)
-                .where(NotebookTemplate.organization_id == organization_id)
+                .where(
+                    NotebookTemplate.organization_id == organization_id,
+                )
                 .order_by(NotebookTemplate.name, NotebookTemplate.id)
             )
         )
@@ -248,7 +548,9 @@ class NotebookRepository:
         return list(
             self._db.scalars(
                 select(EquipmentResource)
-                .where(EquipmentResource.organization_id == organization_id)
+                .where(
+                    EquipmentResource.organization_id == organization_id,
+                )
                 .order_by(EquipmentResource.name, EquipmentResource.id)
             )
         )
@@ -328,7 +630,15 @@ class NotebookRepository:
         experiments = self._db.scalars(
             select(Experiment).where(
                 Experiment.organization_id == organization_id,
-                Experiment.name.ilike(pattern, escape="\\"),
+                (Experiment.name.ilike(pattern, escape="\\"))
+                | select(RecordTag.id)
+                .where(
+                    RecordTag.organization_id == organization_id,
+                    RecordTag.entity_type == "experiment",
+                    RecordTag.entity_id == Experiment.id,
+                    RecordTag.tag.ilike(pattern, escape="\\"),
+                )
+                .exists(),
             ).limit(100)
         )
         hits.extend(
@@ -342,7 +652,15 @@ class NotebookRepository:
                 NotebookEntry.organization_id == organization_id,
                 Experiment.organization_id == organization_id,
                 (NotebookEntry.title.ilike(pattern, escape="\\"))
-                | (NotebookEntry.content.ilike(pattern, escape="\\")),
+                | (NotebookEntry.content.ilike(pattern, escape="\\"))
+                | select(RecordTag.id)
+                .where(
+                    RecordTag.organization_id == organization_id,
+                    RecordTag.entity_type == "entry",
+                    RecordTag.entity_id == NotebookEntry.id,
+                    RecordTag.tag.ilike(pattern, escape="\\"),
+                )
+                .exists(),
             )
             .limit(100)
         ).all()
@@ -354,9 +672,18 @@ class NotebookRepository:
             select(InventoryItem)
             .where(
                 InventoryItem.organization_id == organization_id,
+                InventoryItem.status == "active",
                 (InventoryItem.name.ilike(pattern, escape="\\"))
                 | (InventoryItem.catalog_number.ilike(pattern, escape="\\"))
-                | (InventoryItem.lot_number.ilike(pattern, escape="\\")),
+                | (InventoryItem.lot_number.ilike(pattern, escape="\\"))
+                | select(RecordTag.id)
+                .where(
+                    RecordTag.organization_id == organization_id,
+                    RecordTag.entity_type == "inventory",
+                    RecordTag.entity_id == InventoryItem.id,
+                    RecordTag.tag.ilike(pattern, escape="\\"),
+                )
+                .exists(),
             )
             .limit(100)
         )
@@ -368,9 +695,18 @@ class NotebookRepository:
             select(Sample)
             .where(
                 Sample.organization_id == organization_id,
+                Sample.status == "active",
                 (Sample.name.ilike(pattern, escape="\\"))
                 | (Sample.external_id.ilike(pattern, escape="\\"))
-                | (Sample.sample_type.ilike(pattern, escape="\\")),
+                | (Sample.sample_type.ilike(pattern, escape="\\"))
+                | select(RecordTag.id)
+                .where(
+                    RecordTag.organization_id == organization_id,
+                    RecordTag.entity_type == "sample",
+                    RecordTag.entity_id == Sample.id,
+                    RecordTag.tag.ilike(pattern, escape="\\"),
+                )
+                .exists(),
             )
             .limit(100)
         )
@@ -378,12 +714,44 @@ class NotebookRepository:
             ("sample", sample.id, sample.name, sample.external_id, sample.project_id)
             for sample in samples
         )
+        equipment = self._db.scalars(
+            select(EquipmentResource)
+            .where(
+                EquipmentResource.organization_id == organization_id,
+                EquipmentResource.status == "active",
+                (EquipmentResource.name.ilike(pattern, escape="\\"))
+                | (EquipmentResource.location.ilike(pattern, escape="\\"))
+                | (EquipmentResource.category.ilike(pattern, escape="\\"))
+                | select(RecordTag.id)
+                .where(
+                    RecordTag.organization_id == organization_id,
+                    RecordTag.entity_type == "equipment",
+                    RecordTag.entity_id == EquipmentResource.id,
+                    RecordTag.tag.ilike(pattern, escape="\\"),
+                )
+                .exists(),
+            )
+            .limit(100)
+        )
+        hits.extend(
+            ("equipment", item.id, item.name, item.location, None)
+            for item in equipment
+        )
         templates = self._db.scalars(
             select(NotebookTemplate)
             .where(
                 NotebookTemplate.organization_id == organization_id,
+                NotebookTemplate.status == "active",
                 (NotebookTemplate.name.ilike(pattern, escape="\\"))
-                | (NotebookTemplate.description.ilike(pattern, escape="\\")),
+                | (NotebookTemplate.description.ilike(pattern, escape="\\"))
+                | select(RecordTag.id)
+                .where(
+                    RecordTag.organization_id == organization_id,
+                    RecordTag.entity_type == "template",
+                    RecordTag.entity_id == NotebookTemplate.id,
+                    RecordTag.tag.ilike(pattern, escape="\\"),
+                )
+                .exists(),
             )
             .limit(100)
         )

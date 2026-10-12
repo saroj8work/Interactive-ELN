@@ -1,20 +1,20 @@
-import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from eln_common.config import required_postgresql_url
 from eln_common.database import Database
 
 from . import models
 from .router import create_router
 
-database = Database(os.getenv("DATABASE_URL", "sqlite:///./data/activity.db"))
+database = Database(required_postgresql_url("ACTIVITY_DATABASE_URL"))
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     _ = models
-    database.create_schema()
+    database.assert_schema_is_current("activity")
     try:
         yield
     finally:

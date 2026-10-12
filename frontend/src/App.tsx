@@ -7,10 +7,12 @@ import type {
   EquipmentBooking,
   EquipmentResource,
   Experiment,
+  LabTask,
   InventoryItem,
   NotebookTemplate,
   NotebookEntry,
   Project,
+  RecordSignature,
   SearchHit,
   SampleRecord,
 } from "./types";
@@ -46,6 +48,11 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
   const [attachments, setAttachments] = useState<EntryAttachment[]>([]);
   const [revisions, setRevisions] = useState<EntryRevision[]>([]);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [entryTags, setEntryTags] = useState<string[]>([]);
+  const [entryTagDraft, setEntryTagDraft] = useState("");
+  const [entrySignatures, setEntrySignatures] = useState<RecordSignature[]>([]);
+  const [tasksOpen, setTasksOpen] = useState(false);
+  const [auditNotice, setAuditNotice] = useState("");
 
   const loadProjects = useCallback(async () => {
     try {
@@ -155,6 +162,9 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
     if (selectedEntry === null) {
       setAttachments([]);
       setRevisions([]);
+      setEntryTags([]);
+      setEntryTagDraft("");
+      setEntrySignatures([]);
       setHistoryOpen(false);
       return;
     }
@@ -166,6 +176,24 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
       })
       .catch((err: unknown) => {
         if (active) setError(err instanceof Error ? err.message : "Unable to load attachments.");
+      });
+    api
+      .recordTags("entry", selectedEntry)
+      .then((tagSet) => {
+        if (!active) return;
+        setEntryTags(tagSet.tags);
+        setEntryTagDraft(tagSet.tags.join(", "));
+      })
+      .catch((err: unknown) => {
+        if (active) setError(err instanceof Error ? err.message : "Unable to load entry tags.");
+      });
+    api
+      .entrySignatures(selectedEntry)
+      .then((items) => {
+        if (active) setEntrySignatures(items);
+      })
+      .catch((err: unknown) => {
+        if (active) setError(err instanceof Error ? err.message : "Unable to load entry signatures.");
       });
     return () => {
       active = false;
@@ -195,6 +223,70 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
     }
   }
 
+  async function handleProjectExport(format: "json" | "csv") {
+    if (selectedProject === null) return;
+    try {
+      await api.exportProject(selectedProject, format);
+      setError("");
+      setNotice(`Project ${format.toUpperCase()} export downloaded.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to export project.");
+    }
+  }
+
+  async function handleProjectBundleExport() {
+    if (selectedProject === null) return;
+    try {
+      await api.exportProjectBundle(selectedProject);
+      setNotice("Attachment-inclusive project bundle downloaded.");
+      setError("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to export project bundle.");
+    }
+  }
+
+  async function handleProjectImport(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (selectedProject === null) return;
+    const form = event.currentTarget;
+    const file = new FormData(form).get("bundle");
+    if (!(file instanceof File) || file.size === 0) {
+      setError("Choose a project JSON or ZIP bundle to import.");
+      return;
+    }
+    try {
+      const result = await api.importProject(selectedProject, file);
+      await loadProjects();
+      const importedExperiments = await api.experiments(selectedProject);
+      setExperiments(importedExperiments);
+      setSelectedExperiment(importedExperiments[0]?.id ?? null);
+      setNotice(
+        `Imported ${result.experiments_imported} experiments, ${result.entries_imported} entries, ${result.attachments_imported} attachments, and ${result.tasks_imported} tasks.`,
+      );
+      setError("");
+      form.reset();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to import project bundle.");
+    }
+  }
+
+  async function handleEntrySignature(
+    meaning: RecordSignature["meaning"],
+    comment: string,
+  ): Promise<boolean> {
+    if (selectedEntry === null) return false;
+    try {
+      const signature = await api.signEntry(selectedEntry, meaning, comment);
+      setEntrySignatures((current) => [...current, signature]);
+      setNotice(`Record signed as ${meaning}.`);
+      setError("");
+      return true;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to sign notebook record.");
+      return false;
+    }
+  }
+
   async function handleCreateExperiment(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (selectedProject === null) return;
@@ -211,6 +303,23 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
       event.currentTarget.reset();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to create experiment.");
+    }
+  }
+
+  async function handleExperimentStatusChange(status: Experiment["status"]) {
+    if (selectedExperiment === null) return;
+    try {
+      const updated = await api.updateExperimentStatus(selectedExperiment, status);
+      setExperiments((items) =>
+        items.map((experiment) =>
+          experiment.id === updated.id ? updated : experiment,
+        ),
+      );
+      setNotice(`Experiment marked ${status.replace("_", " ")}.`);
+      setError("");
+      await loadProjects();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to update experiment status.");
     }
   }
 
@@ -315,6 +424,25 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
     }
   }
 
+  async function handleSaveEntryTags(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (selectedEntry === null) return;
+    try {
+      const result = await api.updateRecordTags(
+        "entry",
+        selectedEntry,
+        entryTagDraft.split(","),
+      );
+      setEntryTags(result.tags);
+      setEntryTagDraft(result.tags.join(", "));
+      setNotice("Entry tags updated.");
+      setError("");
+      await loadProjects();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to update entry tags.");
+    }
+  }
+
   const latestActivity = activity.slice(0, 5);
 
   async function handleSearch(event: FormEvent<HTMLFormElement>) {
@@ -414,6 +542,24 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
                 </button>
               )}
             <span className="signed-in-user">{user.display_name}</span>
+            {user.role === "admin" && (
+              <button
+                className="button button-outline"
+                onClick={() => {
+                  void api.verifyAuditChain()
+                    .then((result) => setAuditNotice(
+                      result.valid
+                        ? `Audit chain verified (${result.checked_events} events).`
+                        : `Audit chain integrity check failed (${result.checked_events} events checked).`,
+                    ))
+                    .catch((err: unknown) => setError(
+                      err instanceof Error ? err.message : "Unable to verify audit chain.",
+                    ));
+                }}
+              >
+                Verify audit chain
+              </button>
+            )}
             <button className="button button-outline" onClick={onLogout}>Sign out</button>
             <span className="avatar avatar-small">R</span>
           </div>
@@ -423,6 +569,12 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
           <div className="notice notice-error" role="alert">
             {error}
             <button aria-label="Dismiss error" onClick={() => setError("")}>×</button>
+          </div>
+        )}
+        {auditNotice && (
+          <div className="notice notice-success" role="status">
+            {auditNotice}
+            <button aria-label="Dismiss audit notice" onClick={() => setAuditNotice("")}>×</button>
           </div>
         )}
         {notice && (
@@ -459,6 +611,7 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
         )}
         {templatesOpen && (
           <TemplatePanel
+            user={user}
             templates={templates}
             projects={projects}
             onRefresh={loadTemplates}
@@ -513,8 +666,57 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
                   <h1>{selectedProjectData.name}</h1>
                   <p className="muted">{selectedProjectData.description || "A shared space for your research."}</p>
                 </div>
-                <div className="project-state"><span /> Active project</div>
+                <div className="project-export-actions">
+                  <button
+                    className="button button-outline"
+                    type="button"
+                    onClick={() => setTasksOpen((open) => !open)}
+                  >
+                    {tasksOpen ? "Hide tasks" : "Tasks"}
+                  </button>
+                  <button
+                    className="button button-outline"
+                    type="button"
+                    onClick={() => void handleProjectExport("json")}
+                  >
+                    Export JSON
+                  </button>
+                  <button
+                    className="button button-outline"
+                    type="button"
+                    onClick={() => void handleProjectExport("csv")}
+                  >
+                    Export CSV
+                  </button>
+                  <button
+                    className="button button-outline"
+                    type="button"
+                    onClick={() => void handleProjectBundleExport()}
+                  >
+                    Export ZIP
+                  </button>
+                  {projectAccessRole !== null && projectAccessRole !== "viewer" && (
+                    <form className="project-import-form" onSubmit={handleProjectImport}>
+                      <input
+                        aria-label="Import project JSON or ZIP"
+                        name="bundle"
+                        type="file"
+                        accept=".json,.zip,application/json,application/zip"
+                        required
+                      />
+                      <button className="button button-outline" type="submit">
+                        Import
+                      </button>
+                    </form>
+                  )}
+                </div>
               </div>
+              {tasksOpen && selectedProject !== null && (
+                <TaskPanel
+                  projectId={selectedProject}
+                  writable={projectAccessRole !== null && projectAccessRole !== "viewer"}
+                />
+              )}
 
               <div className="section-heading">
                 <div>
@@ -559,9 +761,37 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
                       <p className="eyebrow">EXPERIMENT NOTEBOOK</p>
                       <h2>{selectedExperimentData.name}</h2>
                     </div>
-                    <button className="button button-primary" onClick={() => void handleCreateEntry()}>
-                      <span>＋</span> New entry
-                    </button>
+                    <div className="experiment-actions">
+                      <label>
+                        Status
+                        <select
+                          value={selectedExperimentData.status}
+                          disabled={
+                            projectAccessRole === null || projectAccessRole === "viewer"
+                          }
+                          onChange={(event) =>
+                            event.target.value === "in_progress" ||
+                            event.target.value === "completed" ||
+                            event.target.value === "archived"
+                              ? void handleExperimentStatusChange(event.target.value)
+                              : undefined
+                          }
+                        >
+                          <option value="in_progress">In progress</option>
+                          <option value="completed">Completed</option>
+                          <option value="archived">Archived</option>
+                        </select>
+                      </label>
+                      <button
+                        className="button button-primary"
+                        onClick={() => void handleCreateEntry()}
+                        disabled={
+                          projectAccessRole === null || projectAccessRole === "viewer"
+                        }
+                      >
+                        <span>＋</span> New entry
+                      </button>
+                    </div>
                   </div>
                   <div className="notebook-layout">
                     <nav className="entry-list" aria-label="Notebook entries">
@@ -595,6 +825,88 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
                           <span className="record-indicator"><span /> Notebook record</span>
                           <span>Updated {formatDate(activeEntry.updated_at)}</span>
                         </div>
+                        <form className="entry-tags-form" onSubmit={handleSaveEntryTags}>
+                          <label htmlFor="entry-tags">Tags</label>
+                          <input
+                            id="entry-tags"
+                            value={entryTagDraft}
+                            onChange={(event) => setEntryTagDraft(event.target.value)}
+                            placeholder="cell culture, assay (comma separated)"
+                            maxLength={840}
+                          />
+                          <button
+                            className="button button-outline"
+                            type="submit"
+                            disabled={
+                              projectAccessRole === null || projectAccessRole === "viewer"
+                            }
+                          >
+                            Save tags
+                          </button>
+                        </form>
+                        {entryTags.length > 0 && (
+                          <div className="entry-tag-list" aria-label="Entry tags">
+                            {entryTags.map((tag) => <span key={tag}>{tag}</span>)}
+                          </div>
+                        )}
+                        <section className="signature-panel" aria-label="Electronic signature foundation">
+                          <strong>Record signatures</strong>
+                          <p>
+                            A signature records your authenticated account, intent, timestamp, and a digest
+                            of this entry. This foundation is not validated or regulatory-compliant.
+                          </p>
+                          <form
+                            className="signature-form"
+                            onSubmit={(event) => {
+                              event.preventDefault();
+                              const form = event.currentTarget;
+                              const values = new FormData(form);
+                              const meaning = String(values.get("meaning"));
+                              if (
+                                meaning === "authored" ||
+                                meaning === "reviewed" ||
+                                meaning === "approved"
+                              ) {
+                                void handleEntrySignature(
+                                  meaning,
+                                  String(values.get("comment") ?? ""),
+                                ).then((signed) => {
+                                  if (signed) form.reset();
+                                });
+                              }
+                            }}
+                          >
+                            <select name="meaning" aria-label="Signature meaning" defaultValue="reviewed">
+                              <option value="authored">Authored</option>
+                              <option value="reviewed">Reviewed</option>
+                              <option value="approved">Approved</option>
+                            </select>
+                            <input name="comment" maxLength={500} placeholder="Comment (optional)" />
+                            <label>
+                              <input name="confirm" type="checkbox" required />
+                              I intend to apply this signature to the current record.
+                            </label>
+                            <button
+                              className="button button-outline"
+                              type="submit"
+                              disabled={projectAccessRole === null || projectAccessRole === "viewer"}
+                            >
+                              Sign record
+                            </button>
+                          </form>
+                          {entrySignatures.length > 0 && (
+                            <ul className="signature-list">
+                              {entrySignatures.map((signature) => (
+                                <li key={signature.id}>
+                                  <span>
+                                    <strong>{signature.meaning}</strong> · user #{signature.signed_by_user_id}
+                                    <small>{formatDate(signature.created_at)} · SHA-256 {signature.record_sha256.slice(0, 12)}…</small>
+                                  </span>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </section>
                         <div className="attachment-tools">
                           <form className="attachment-upload-form" onSubmit={handleUploadAttachment}>
                             <input name="file" type="file" required aria-label="Choose a file to attach" />
@@ -1056,6 +1368,174 @@ function AdminPanel({ onClose, currentUserId }: { onClose: () => void; currentUs
   );
 }
 
+function TaskPanel({ projectId, writable }: { projectId: number; writable: boolean }) {
+  const [tasks, setTasks] = useState<LabTask[]>([]);
+  const [error, setError] = useState("");
+
+  const loadTasks = useCallback(async () => {
+    try {
+      setTasks(await api.tasks(projectId));
+      setError("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to load project tasks.");
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    void loadTasks();
+  }, [loadTasks]);
+
+  async function createTask(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const values = new FormData(form);
+    const due = String(values.get("due_at") ?? "");
+    try {
+      await api.createTask(projectId, {
+        title: String(values.get("title") ?? ""),
+        description: String(values.get("description") ?? ""),
+        priority:
+          values.get("priority") === "low" ||
+          values.get("priority") === "high" ||
+          values.get("priority") === "urgent"
+            ? values.get("priority") as LabTask["priority"]
+            : "normal",
+        due_at: due ? new Date(due).toISOString() : null,
+        experiment_id: null,
+      });
+      form.reset();
+      await loadTasks();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to create task.");
+    }
+  }
+
+  async function changeStatus(taskId: number, status: LabTask["status"]) {
+    try {
+      await api.updateTaskStatus(taskId, status);
+      await loadTasks();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to update task.");
+    }
+  }
+
+  return (
+    <section className="task-panel" aria-label="Project tasks and workflow">
+      <div className="section-heading">
+        <div>
+          <h2>Tasks and workflow</h2>
+          <p>Track actionable work against this project.</p>
+        </div>
+        <span className="count-pill">{tasks.length}</span>
+      </div>
+      {error && <p className="inline-error" role="alert">{error}</p>}
+      {writable && (
+        <form className="task-create-form" onSubmit={createTask}>
+          <input name="title" placeholder="Task title" maxLength={200} required />
+          <input name="description" placeholder="Description (optional)" maxLength={5000} />
+          <input name="due_at" type="datetime-local" aria-label="Task due date" />
+          <select name="priority" defaultValue="normal" aria-label="Task priority">
+            <option value="low">Low</option>
+            <option value="normal">Normal</option>
+            <option value="high">High</option>
+            <option value="urgent">Urgent</option>
+          </select>
+          <button className="button button-outline" type="submit">Add task</button>
+        </form>
+      )}
+      <ul className="task-list">
+        {tasks.map((task) => (
+          <li key={task.id}>
+            <div>
+              <strong>{task.title}</strong>
+              <small>{task.priority} priority · {task.due_at ? formatDate(task.due_at) : "No due date"}</small>
+              {task.description && <p>{task.description}</p>}
+            </div>
+            <select
+              aria-label={`Status for ${task.title}`}
+              value={task.status}
+              disabled={!writable}
+              onChange={(event) => {
+                const value = event.target.value;
+                if (
+                  value === "open" ||
+                  value === "in_progress" ||
+                  value === "blocked" ||
+                  value === "completed" ||
+                  value === "cancelled"
+                ) {
+                  void changeStatus(task.id, value);
+                }
+              }}
+            >
+              <option value="open">Open</option>
+              <option value="in_progress">In progress</option>
+              <option value="blocked">Blocked</option>
+              <option value="completed">Completed</option>
+              <option value="cancelled">Cancelled</option>
+            </select>
+          </li>
+        ))}
+        {tasks.length === 0 && <li className="empty-hint">No tasks for this project yet.</li>}
+      </ul>
+    </section>
+  );
+}
+
+function ResourceTagEditor({
+  entityType,
+  entityId,
+}: {
+  entityType: "inventory" | "sample" | "equipment" | "template";
+  entityId: number;
+}) {
+  const [draft, setDraft] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    api.recordTags(entityType, entityId)
+      .then((result) => {
+        if (active) setDraft(result.tags.join(", "));
+      })
+      .catch((err: unknown) => {
+        if (active) setError(err instanceof Error ? err.message : "Unable to load resource tags.");
+      });
+    return () => {
+      active = false;
+    };
+  }, [entityId, entityType]);
+
+  async function save(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    try {
+      const result = await api.updateRecordTags(
+        entityType,
+        entityId,
+        draft.split(","),
+      );
+      setDraft(result.tags.join(", "));
+      setError("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to update resource tags.");
+    }
+  }
+
+  return (
+    <form className="resource-tags-form" onSubmit={(event) => void save(event)}>
+      <input
+        aria-label={`${entityType} tags`}
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+        placeholder="Tags, comma separated"
+        maxLength={840}
+      />
+      <button className="button button-outline" type="submit">Save tags</button>
+      {error && <small role="alert">{error}</small>}
+    </form>
+  );
+}
+
 function ProjectAccessPanel({
   projectId,
   onClose,
@@ -1257,6 +1737,20 @@ function InventoryPanel({
     }
   }
 
+  async function changeResourceStatus(
+    entityType: "inventory" | "sample",
+    entityId: number,
+    status: "active" | "archived",
+  ) {
+    try {
+      await api.updateResourceStatus(entityType, entityId, status);
+      setNotice(`Resource ${status}.`);
+      await loadRecords();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to update resource lifecycle.");
+    }
+  }
+
   return (
     <section className="admin-panel inventory-panel" aria-label="Lab inventory">
       <header>
@@ -1269,11 +1763,22 @@ function InventoryPanel({
       <h3 className="inventory-subheading">Reagents, consumables &amp; equipment</h3>
       <form className="inventory-form" onSubmit={createInventoryItem}>
         <input name="name" placeholder="Item name" required maxLength={160} />
-        <select name="category" defaultValue="reagent">
-          <option value="reagent">Reagent</option>
-          <option value="consumable">Consumable</option>
-          <option value="equipment">Equipment</option>
-        </select>
+        <input
+          name="category"
+          list="inventory-categories"
+          defaultValue="reagent"
+          placeholder="Category (custom allowed)"
+          required
+          maxLength={64}
+        />
+        <datalist id="inventory-categories">
+          <option value="reagent" />
+          <option value="consumable" />
+          <option value="equipment" />
+          <option value="chemical" />
+          <option value="biological" />
+          <option value="safety" />
+        </datalist>
         <input name="unit" placeholder="Unit (mL, g, each)" required maxLength={32} />
         <input name="quantity" type="number" min="0" step="0.001" placeholder="Opening stock" defaultValue="0" />
         <input name="low_stock_threshold" type="number" min="0" step="0.001" placeholder="Low-stock threshold" defaultValue="0" />
@@ -1289,17 +1794,27 @@ function InventoryPanel({
           <article className="inventory-record" key={item.id}>
             <div className="inventory-record-heading">
               <strong>{item.name}</strong>
-              <span className={`status-chip ${item.quantity <= item.low_stock_threshold ? "status-low-stock" : ""}`}>
-                {item.quantity} {item.unit}{item.quantity <= item.low_stock_threshold ? " · low stock" : ""}
-              </span>
+              <div>
+                <span className={`status-chip ${item.status === "archived" ? "status-archived" : item.quantity <= item.low_stock_threshold ? "status-low-stock" : ""}`}>
+                  {item.status === "archived" ? "Archived" : `${item.quantity} ${item.unit}${item.quantity <= item.low_stock_threshold ? " · low stock" : ""}`}
+                </span>
+                <button
+                  className="button button-outline"
+                  type="button"
+                  onClick={() => void changeResourceStatus("inventory", item.id, item.status === "active" ? "archived" : "active")}
+                >
+                  {item.status === "active" ? "Archive" : "Reactivate"}
+                </button>
+              </div>
             </div>
             <small>{item.category} · {item.location || "No location"} · Lot {item.lot_number || "not specified"}</small>
+            <ResourceTagEditor entityType="inventory" entityId={item.id} />
             {item.expires_on && <small>Expires {item.expires_on}</small>}
-            <form className="stock-adjust-form" onSubmit={(event) => void adjustStock(event, item.id)}>
+            {item.status === "active" && <form className="stock-adjust-form" onSubmit={(event) => void adjustStock(event, item.id)}>
               <input name="quantity_delta" type="number" step="0.001" placeholder="± quantity" required />
               <input name="reason" placeholder="Reason for adjustment" maxLength={240} required />
               <button className="button button-outline" type="submit">Record adjustment</button>
-            </form>
+            </form>}
           </article>
         ))}
         {items.length === 0 && <p className="empty-hint">No inventory records yet.</p>}
@@ -1322,9 +1837,19 @@ function InventoryPanel({
           <article className="inventory-record" key={sample.id}>
             <div className="inventory-record-heading">
               <strong>{sample.name}</strong>
-              <span className="status-chip">{sample.sample_type}</span>
+              <div>
+                <span className="status-chip">{sample.status === "archived" ? "Archived" : sample.sample_type}</span>
+                <button
+                  className="button button-outline"
+                  type="button"
+                  onClick={() => void changeResourceStatus("sample", sample.id, sample.status === "active" ? "archived" : "active")}
+                >
+                  {sample.status === "active" ? "Archive" : "Reactivate"}
+                </button>
+              </div>
             </div>
             <small>{sample.external_id || "No sample ID"} · {sample.storage_location || "No location"} · {projects.find((project) => project.id === sample.project_id)?.name ?? "Organization sample"}</small>
+            <ResourceTagEditor entityType="sample" entityId={sample.id} />
           </article>
         ))}
         {samples.length === 0 && <p className="empty-hint">No samples registered yet.</p>}
@@ -1334,12 +1859,14 @@ function InventoryPanel({
 }
 
 function TemplatePanel({
+  user,
   templates,
   projects,
   onRefresh,
   onProtocolStarted,
   onClose,
 }: {
+  user: AuthUser;
   templates: NotebookTemplate[];
   projects: Project[];
   onRefresh: () => Promise<void>;
@@ -1413,10 +1940,30 @@ function TemplatePanel({
           <article className="inventory-record" key={template.id}>
             <div className="inventory-record-heading">
               <strong>{template.name}</strong>
-              <span className="status-chip">{template.template_kind}</span>
+              <div>
+                <span className={`status-chip ${template.status === "archived" ? "status-archived" : ""}`}>
+                  {template.status === "archived" ? "Archived" : template.template_kind}
+                </span>
+                {user.role === "admin" && (
+                  <button
+                    className="button button-outline"
+                    type="button"
+                    onClick={() => void api.updateResourceStatus(
+                      "template",
+                      template.id,
+                      template.status === "active" ? "archived" : "active",
+                    ).then(onRefresh).catch((err: unknown) => setError(
+                      err instanceof Error ? err.message : "Unable to update template lifecycle.",
+                    ))}
+                  >
+                    {template.status === "active" ? "Archive" : "Reactivate"}
+                  </button>
+                )}
+              </div>
             </div>
             <small>{template.description || template.sections.map((section) => section.title).join(" · ")}</small>
-            {template.template_kind === "protocol" && (
+            <ResourceTagEditor entityType="template" entityId={template.id} />
+            {template.template_kind === "protocol" && template.status === "active" && (
               <form className="template-apply-form" onSubmit={(event) => void startProtocol(event, template.id)}>
                 <select name="project_id" defaultValue="" required>
                   <option value="" disabled>Choose project</option>
@@ -1471,6 +2018,7 @@ function EquipmentPanel({
         name: String(form.get("name") ?? ""),
         description: String(form.get("description") ?? ""),
         location: String(form.get("location") ?? ""),
+        category: String(form.get("category") ?? "equipment"),
       });
       formElement.reset();
       setNotice("Equipment registered.");
@@ -1523,6 +2071,7 @@ function EquipmentPanel({
       {user.role === "admin" && (
         <form className="equipment-create-form" onSubmit={addEquipment}>
           <input name="name" placeholder="Equipment name" required maxLength={160} />
+          <input name="category" placeholder="Category" defaultValue="equipment" maxLength={64} />
           <input name="location" placeholder="Location" maxLength={200} />
           <input name="description" placeholder="Description (optional)" maxLength={5000} />
           <button className="button button-primary" type="submit">Add equipment</button>
@@ -1532,10 +2081,32 @@ function EquipmentPanel({
         {equipment.map((resource) => (
           <article className="inventory-record" key={resource.id}>
             <div className="inventory-record-heading">
-              <strong>{resource.name}</strong><span className="status-chip">{resource.location || "Location unspecified"}</span>
+              <strong>{resource.name}</strong>
+              <div>
+                <span className={`status-chip ${resource.status === "archived" ? "status-archived" : ""}`}>
+                  {resource.status === "archived" ? "Archived" : resource.location || "Location unspecified"}
+                </span>
+                {user.role === "admin" && (
+                  <button
+                    className="button button-outline"
+                    type="button"
+                    onClick={() => void api.updateResourceStatus(
+                      "equipment",
+                      resource.id,
+                      resource.status === "active" ? "archived" : "active",
+                    ).then(loadSchedule).catch((err: unknown) => setError(
+                      err instanceof Error ? err.message : "Unable to update equipment lifecycle.",
+                    ))}
+                  >
+                    {resource.status === "active" ? "Archive" : "Reactivate"}
+                  </button>
+                )}
+              </div>
             </div>
+            <small>{resource.category}</small>
             {resource.description && <small>{resource.description}</small>}
-            <form className="equipment-booking-form" onSubmit={(event) => void reserve(event, resource.id)}>
+            <ResourceTagEditor entityType="equipment" entityId={resource.id} />
+            {resource.status === "active" && <form className="equipment-booking-form" onSubmit={(event) => void reserve(event, resource.id)}>
               <input name="starts_at" type="datetime-local" required aria-label="Booking start" />
               <input name="ends_at" type="datetime-local" required aria-label="Booking end" />
               <input name="purpose" placeholder="Purpose" required maxLength={500} />
@@ -1544,7 +2115,7 @@ function EquipmentPanel({
                 {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
               </select>
               <button className="button button-outline" type="submit">Book</button>
-            </form>
+            </form>}
           </article>
         ))}
         {equipment.length === 0 && <p className="empty-hint">No equipment has been registered yet.</p>}

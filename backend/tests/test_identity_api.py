@@ -4,7 +4,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from eln_common.database import Database
+from eln_common.database import Base, Database
 from services.identity.app.router import create_router
 
 
@@ -22,8 +22,8 @@ def test_invite_login_org_admin_refresh_and_logout(
     monkeypatch.setenv("ELN_JWT_SECRET", "test-signing-secret-that-is-at-least-32-bytes")
     monkeypatch.setenv("ELN_BOOTSTRAP_TOKEN", "test-bootstrap-secret-with-over-32-bytes")
     monkeypatch.setenv("PUBLIC_APP_URL", "http://localhost:5173")
-    database = Database("sqlite://")
-    database.create_schema()
+    database = Database("sqlite://", allow_sqlite_for_tests=True)
+    Base.metadata.create_all(bind=database.engine)
     mailer = RecordingMailer()
     app = FastAPI()
     app.include_router(create_router(database, mailer))

@@ -1,7 +1,11 @@
 import type {
   ActivityEvent,
+  AuditVerification,
   EntryAttachment,
   EntryRevision,
+  LabTask,
+  RecordTagSet,
+  RecordSignature,
   EquipmentBooking,
   EquipmentResource,
   Experiment,
@@ -71,7 +75,7 @@ export const api = {
   inventory: () => request<InventoryItem[]>("/api/inventory"),
   createInventoryItem: (payload: {
     name: string;
-    category: "reagent" | "consumable" | "equipment";
+    category: string;
     catalog_number: string;
     lot_number: string;
     expires_on: string | null;
@@ -132,13 +136,51 @@ export const api = {
     link.click();
     URL.revokeObjectURL(url);
   },
+  exportProject: async (projectId: number, format: "json" | "csv") => {
+    const blob = await requestBlob(`/api/projects/${projectId}/export?format=${format}`);
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `eln-project-${projectId}.${format}`;
+    link.click();
+    URL.revokeObjectURL(url);
+  },
+  exportProjectBundle: async (projectId: number) => {
+    const blob = await requestBlob(`/api/projects/${projectId}/export?format=zip`);
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `eln-project-${projectId}.zip`;
+    link.click();
+    URL.revokeObjectURL(url);
+  },
+  importProject: (projectId: number, file: File) => {
+    const body = new FormData();
+    body.set("file", file);
+    return request<{
+      project_id: number;
+      experiments_imported: number;
+      entries_imported: number;
+      attachments_imported: number;
+      tasks_imported: number;
+    }>(`/api/projects/${projectId}/import`, { method: "POST", body });
+  },
+  updateResourceStatus: (
+    entityType: "inventory" | "sample" | "equipment" | "template",
+    entityId: number,
+    status: "active" | "archived",
+  ) =>
+    request(`/api/resources/${entityType}/${entityId}/status`, {
+      method: "PATCH",
+      body: JSON.stringify({ status }),
+    }),
   templates: () => request<NotebookTemplate[]>("/api/templates"),
-  createTemplate: (payload: Omit<NotebookTemplate, "id" | "organization_id" | "created_by_user_id" | "created_at" | "updated_at">) =>
+  createTemplate: (payload: Omit<NotebookTemplate, "id" | "organization_id" | "created_by_user_id" | "created_at" | "updated_at" | "status">) =>
     request<NotebookTemplate>("/api/templates", {
       method: "POST",
       body: JSON.stringify(payload),
     }),
-  updateTemplate: (templateId: number, payload: Omit<NotebookTemplate, "id" | "organization_id" | "created_by_user_id" | "created_at" | "updated_at">) =>
+  updateTemplate: (templateId: number, payload: Omit<NotebookTemplate, "id" | "organization_id" | "created_by_user_id" | "created_at" | "updated_at" | "status">) =>
     request<NotebookTemplate>(`/api/templates/${templateId}`, {
       method: "PUT",
       body: JSON.stringify(payload),
@@ -153,6 +195,14 @@ export const api = {
       { method: "POST" },
     ),
   experiments: (projectId: number) => request<Experiment[]>(`/api/projects/${projectId}/experiments`),
+  updateExperimentStatus: (
+    experimentId: number,
+    status: Experiment["status"],
+  ) =>
+    request<Experiment>(`/api/experiments/${experimentId}/status`, {
+      method: "PATCH",
+      body: JSON.stringify({ status }),
+    }),
   createExperiment: (projectId: number, name: string, description: string) =>
     request<Experiment>(`/api/projects/${projectId}/experiments`, {
       method: "POST",
@@ -177,11 +227,54 @@ export const api = {
       `/api/entries/${entryId}/revisions/${revisionId}/restore`,
       { method: "POST" },
     ),
+  recordTags: (
+    entityType: RecordTagSet["entity_type"],
+    entityId: number,
+  ) =>
+    request<RecordTagSet>(`/api/records/${entityType}/${entityId}/tags`),
+  updateRecordTags: (
+    entityType: RecordTagSet["entity_type"],
+    entityId: number,
+    tags: string[],
+  ) =>
+    request<RecordTagSet>(`/api/records/${entityType}/${entityId}/tags`, {
+      method: "PUT",
+      body: JSON.stringify({ entity_type: entityType, tags }),
+    }),
   activity: () => request<ActivityEvent[]>("/api/activity"),
   search: (query: string) =>
     request<SearchHit[]>(`/api/search?query=${encodeURIComponent(query)}`),
+  tasks: (projectId: number) =>
+    request<LabTask[]>(`/api/projects/${projectId}/tasks`),
+  createTask: (
+    projectId: number,
+    payload: Pick<LabTask, "title" | "description" | "due_at" | "priority"> & {
+      experiment_id: number | null;
+    },
+  ) =>
+    request<LabTask>(`/api/projects/${projectId}/tasks`, {
+      method: "POST",
+      body: JSON.stringify({ ...payload, project_id: projectId }),
+    }),
+  updateTaskStatus: (taskId: number, status: LabTask["status"]) =>
+    request<LabTask>(`/api/tasks/${taskId}/status`, {
+      method: "PATCH",
+      body: JSON.stringify({ status }),
+    }),
+  entrySignatures: (entryId: number) =>
+    request<RecordSignature[]>(`/api/entries/${entryId}/signatures`),
+  signEntry: (
+    entryId: number,
+    meaning: RecordSignature["meaning"],
+    comment: string,
+  ) =>
+    request<RecordSignature>(`/api/entries/${entryId}/signatures`, {
+      method: "POST",
+      body: JSON.stringify({ entity_type: "entry", entity_id: entryId, meaning, comment }),
+    }),
+  verifyAuditChain: () => request<AuditVerification>("/api/audit/verify"),
   equipment: () => request<EquipmentResource[]>("/api/equipment"),
-  createEquipment: (payload: { name: string; description: string; location: string }) =>
+  createEquipment: (payload: { name: string; description: string; location: string; category: string }) =>
     request<EquipmentResource>("/api/equipment", {
       method: "POST",
       body: JSON.stringify(payload),

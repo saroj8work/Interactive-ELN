@@ -48,6 +48,54 @@ class NotebookEntry(Base):
     )
 
 
+class RecordTag(Base):
+    __tablename__ = "record_tags"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id", "entity_type", "entity_id", "tag"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(index=True)
+    entity_type: Mapped[str] = mapped_column(String(24), index=True)
+    entity_id: Mapped[int] = mapped_column(index=True)
+    tag: Mapped[str] = mapped_column(String(40), index=True)
+    created_by_user_id: Mapped[int] = mapped_column()
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class AuditEvent(Base):
+    __tablename__ = "audit_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(index=True)
+    actor_user_id: Mapped[int] = mapped_column(index=True)
+    action: Mapped[str] = mapped_column(String(48))
+    entity_type: Mapped[str] = mapped_column(String(32), index=True)
+    entity_id: Mapped[int] = mapped_column(index=True)
+    payload_json: Mapped[str] = mapped_column(Text)
+    previous_hash: Mapped[str] = mapped_column(String(64))
+    event_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class RecordSignature(Base):
+    __tablename__ = "record_signatures"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(index=True)
+    entity_type: Mapped[str] = mapped_column(String(32), index=True)
+    entity_id: Mapped[int] = mapped_column(index=True)
+    signed_by_user_id: Mapped[int] = mapped_column(index=True)
+    meaning: Mapped[str] = mapped_column(String(24))
+    comment: Mapped[str] = mapped_column(String(500), default="")
+    record_sha256: Mapped[str] = mapped_column(String(64))
+    previous_hash: Mapped[str] = mapped_column(String(64))
+    event_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class EntryRevision(Base):
     __tablename__ = "entry_revisions"
     __table_args__ = (
@@ -70,7 +118,7 @@ class InventoryItem(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     organization_id: Mapped[int] = mapped_column(index=True)
     name: Mapped[str] = mapped_column(String(160), index=True)
-    category: Mapped[str] = mapped_column(String(32), index=True)
+    category: Mapped[str] = mapped_column(String(64), index=True)
     catalog_number: Mapped[str] = mapped_column(String(120), default="")
     lot_number: Mapped[str] = mapped_column(String(120), default="")
     expires_on: Mapped[date | None] = mapped_column()
@@ -81,6 +129,7 @@ class InventoryItem(Base):
     )
     location: Mapped[str] = mapped_column(String(200), default="")
     notes: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(24), default="active", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
@@ -112,6 +161,7 @@ class Sample(Base):
     parent_sample_id: Mapped[int | None] = mapped_column(ForeignKey("samples.id"))
     storage_location: Mapped[str] = mapped_column(String(200), default="")
     description: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(24), default="active", index=True)
     created_by_user_id: Mapped[int] = mapped_column()
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
@@ -126,6 +176,7 @@ class NotebookTemplate(Base):
     template_kind: Mapped[str] = mapped_column(String(24), index=True)
     description: Mapped[str] = mapped_column(Text, default="")
     sections: Mapped[list[dict[str, str | bool]]] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(24), default="active", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
@@ -155,6 +206,8 @@ class EquipmentResource(Base):
     name: Mapped[str] = mapped_column(String(160), index=True)
     description: Mapped[str] = mapped_column(Text, default="")
     location: Mapped[str] = mapped_column(String(200), default="")
+    category: Mapped[str] = mapped_column(String(64), default="equipment", index=True)
+    status: Mapped[str] = mapped_column(String(24), default="active", index=True)
     created_by_user_id: Mapped[int] = mapped_column()
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
@@ -174,3 +227,23 @@ class EquipmentBooking(Base):
     purpose: Mapped[str] = mapped_column(String(500))
     status: Mapped[str] = mapped_column(String(24), default="reserved", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class LabTask(Base):
+    __tablename__ = "lab_tasks"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(index=True)
+    project_id: Mapped[int] = mapped_column(index=True)
+    experiment_id: Mapped[int | None] = mapped_column(index=True)
+    assigned_to_user_id: Mapped[int | None] = mapped_column(index=True)
+    created_by_user_id: Mapped[int] = mapped_column()
+    title: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(Text, default="")
+    due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    priority: Mapped[str] = mapped_column(String(16), default="normal")
+    status: Mapped[str] = mapped_column(String(24), default="open", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )

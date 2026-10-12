@@ -11,14 +11,14 @@ from eln_common.outbox import OutboxEvent, OutboxPublisher
 from . import models
 from .router import create_router
 
-settings = ServiceSettings.for_service("projects", "sqlite:///./data/projects.db")
+settings = ServiceSettings.for_service("projects")
 database = Database(settings.database_url)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     _ = models, OutboxEvent
-    database.create_schema()
+    database.assert_schema_is_current("projects")
     publisher = OutboxPublisher(database, settings.activity_service_url)
     publisher_task = asyncio.create_task(publisher.run())
     try:

@@ -1,7 +1,10 @@
 import asyncio
-from datetime import datetime, timezone
+import io
+import json
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from urllib.parse import parse_qs, urlsplit
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import httpx
 import pytest
@@ -25,7 +28,7 @@ from fastapi.testclient import TestClient
 from services.activity.app.models import ActivityEvent
 from services.activity.app.repository import ActivityRepository
 from services.activity.app.service import ActivityService
-from services.notebook.app.models import Experiment, NotebookEntry
+from services.notebook.app.models import AuditEvent, Experiment, NotebookEntry
 from services.notebook.app.attachment_storage import AttachmentStorage
 from services.notebook.app.repository import NotebookRepository
 from services.notebook.app.router import create_router as create_notebook_router
@@ -46,7 +49,7 @@ from gateway.app.router import get_service_client, notebook_router, projects_rou
 
 
 def new_database() -> Database:
-    database = Database("sqlite://")
+    database = Database("sqlite://", allow_sqlite_for_tests=True)
     Base.metadata.create_all(bind=database.engine)
     return database
 
@@ -95,6 +98,33 @@ def test_notebook_flow_and_reliable_outbox() -> None:
         assert len(list(db.scalars(select(OutboxEvent)))) == 4
         assert db.get(Experiment, experiment.id) is not None
         assert db.get(NotebookEntry, entry.id) is not None
+    database.engine.dispose()
+
+
+def test_experiment_status_changes_emit_outbox_events() -> None:
+    database = new_database()
+    with database.session() as db:
+        project = Project(organization_id=41, name="Cell study", description="")
+        db.add(project)
+        db.flush()
+        service = NotebookService(NotebookRepository(db), db)
+        experiment = service.create_experiment(41, project.id, "Pilot", "")
+
+        completed = service.update_experiment_status(41, experiment.id, 12, "completed")
+        assert completed.status == "completed"
+        assert service.update_experiment_status(
+            41, experiment.id, 12, "completed"
+        ).status == "completed"
+        archived = service.update_experiment_status(41, experiment.id, 12, "archived")
+        assert archived.status == "archived"
+        events = list(db.scalars(select(OutboxEvent)))
+        assert [event.action for event in events] == [
+            "created",
+            "status_changed",
+            "status_changed",
+        ]
+        with pytest.raises(InvalidInputError):
+            service.update_experiment_status(41, experiment.id, 12, "deleted")
     database.engine.dispose()
 
 
@@ -310,6 +340,180 @@ def test_search_matches_notebook_content_and_respects_organization() -> None:
         assert service.search(99, "cytokine") == []
         with pytest.raises(InvalidInputError):
             service.search(41, "%")
+    database.engine.dispose()
+
+
+def test_record_tags_are_normalized_scoped_and_searchable() -> None:
+    database = new_database()
+    with database.session() as db:
+        project = Project(organization_id=41, name="Tag study", description="")
+        db.add(project)
+        db.flush()
+        experiment = Experiment(
+            organization_id=41,
+            project_id=project.id,
+            name="Pilot",
+            description="",
+        )
+        db.add(experiment)
+        db.flush()
+        entry = NotebookEntry(
+            organization_id=41,
+            experiment_id=experiment.id,
+            title="Day one",
+            content="Cell assay",
+        )
+        db.add(entry)
+        db.commit()
+
+        service = NotebookService(NotebookRepository(db), db)
+        updated = service.replace_record_tags(
+            41, "entry", entry.id, 12, [" Cell Culture ", "assay", "cell culture"]
+        )
+        assert updated["tags"] == ["assay", "cell culture"]
+        assert service.get_record_tags(41, "entry", entry.id)["tags"] == [
+            "assay",
+            "cell culture",
+        ]
+        assert [hit["title"] for hit in service.search(41, "culture")] == ["Day one"]
+        assert service.search(99, "culture") == []
+        with pytest.raises(EntityNotFoundError):
+            service.get_record_tags(99, "entry", entry.id)
+        with pytest.raises(InvalidInputError):
+            service.replace_record_tags(41, "entry", entry.id, 12, [" "])
+        assert len(list(db.scalars(select(OutboxEvent)))) == 1
+    database.engine.dispose()
+
+
+def test_resource_tags_lifecycle_tasks_and_audit_signature_foundation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ELN_AUDIT_HMAC_KEY", "test-audit-key-with-at-least-32-bytes")
+    database = new_database()
+    with database.session() as db:
+        project = Project(organization_id=41, name="Workflow study", description="")
+        db.add(project)
+        db.flush()
+        service = NotebookService(NotebookRepository(db), db)
+        experiment = service.create_experiment(41, project.id, "Pilot", "")
+        entry = service.create_entry(41, experiment.id, "Day one", "Initial notes")
+        item = service.create_inventory_item(
+            41,
+            12,
+            {
+                "name": "Buffer",
+                "category": "  cold-chain  ",
+                "catalog_number": "",
+                "lot_number": "",
+                "expires_on": None,
+                "quantity": Decimal("3"),
+                "unit": "mL",
+                "low_stock_threshold": Decimal("1"),
+                "location": "Freezer",
+                "notes": "",
+            },
+        )
+        sample = service.create_sample(
+            41,
+            12,
+            {
+                "name": "Cell line A",
+                "sample_type": "cell line",
+                "external_id": "CL-A",
+                "project_id": project.id,
+                "parent_sample_id": None,
+                "storage_location": "Freezer 2",
+                "description": "",
+            },
+        )
+        service.replace_record_tags(41, "inventory", item.id, 12, ["cold chain"])
+        service.replace_record_tags(41, "sample", sample.id, 12, ["cell line"])
+        assert service.get_record_tags(41, "inventory", item.id)["tags"] == [
+            "cold chain"
+        ]
+        assert service.get_record_tags(41, "sample", sample.id)["tags"] == [
+            "cell line"
+        ]
+        assert item.category == "cold-chain"
+
+        task = service.create_task(
+            41,
+            12,
+            {
+                "project_id": project.id,
+                "experiment_id": experiment.id,
+                "assigned_to_user_id": None,
+                "title": "Review results",
+                "description": "",
+                "due_at": datetime.now(timezone.utc),
+                "priority": "high",
+            },
+        )
+        assert service.update_task_status(41, task.id, 12, "completed").status == "completed"
+        assert service.list_tasks(41, project.id)[0].title == "Review results"
+
+        signature = service.create_signature(41, 12, entry.id, "reviewed", "Looks good")
+        assert signature.record_sha256
+        assert service.verify_audit_chain(41) == {
+            "organization_id": 41,
+            "valid": True,
+            "checked_events": 1,
+        }
+        audit_event = db.scalar(select(AuditEvent))
+        assert audit_event is not None
+        audit_event.payload_json = '{"tampered":true}'
+        db.commit()
+        assert service.verify_audit_chain(41)["valid"] is False
+    database.engine.dispose()
+
+
+def test_archived_resources_are_visible_but_not_usable() -> None:
+    database = new_database()
+    with database.session() as db:
+        service = NotebookService(NotebookRepository(db), db)
+        item = service.create_inventory_item(
+            41,
+            12,
+            {
+                "name": "Archived reagent",
+                "category": "reagent",
+                "catalog_number": "",
+                "lot_number": "",
+                "expires_on": None,
+                "quantity": Decimal("1"),
+                "unit": "g",
+                "low_stock_threshold": Decimal("0"),
+                "location": "",
+                "notes": "",
+            },
+        )
+        archived = service.update_resource_status(
+            41, "inventory", item.id, 12, "archived"
+        )
+        assert archived.status == "archived"
+        assert service.list_inventory(41)[0].status == "archived"
+        with pytest.raises(InvalidInputError):
+            service.adjust_stock(41, item.id, 12, Decimal("1"), "restock")
+
+        equipment = service.create_equipment(
+            41, 12, {"name": "Incubator", "description": "", "location": ""}
+        )
+        start = datetime.now(timezone.utc) + timedelta(days=1)
+        service.create_booking(
+            41,
+            equipment.id,
+            12,
+            {
+                "starts_at": start,
+                "ends_at": start + timedelta(hours=1),
+                "purpose": "Cell culture",
+                "project_id": None,
+            },
+        )
+        with pytest.raises(InvalidInputError):
+            service.update_resource_status(
+                41, "equipment", equipment.id, 12, "archived"
+            )
     database.engine.dispose()
 
 
@@ -672,6 +876,413 @@ def test_gateway_blocks_viewer_writes_to_notebook(
         json={"name": "Viewer attempt", "description": ""},
     )
     assert response.status_code == 403
+
+
+def test_gateway_blocks_viewer_from_changing_entry_tags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ELN_JWT_SECRET", "test-signing-secret-that-is-at-least-32-bytes")
+
+    class ViewerClient:
+        async def get(
+            self,
+            service: str,
+            path: str,
+            adapter: TypeAdapter,
+            *,
+            organization_id: int,
+            user_id: int | None = None,
+            organization_role: str | None = None,
+        ):
+            if service == "notebook" and path == "/entries/7":
+                return adapter.validate_python(
+                    {
+                        "id": 7,
+                        "experiment_id": 2,
+                        "title": "Notes",
+                        "content": "",
+                        "created_at": "2026-10-10T12:00:00Z",
+                        "updated_at": "2026-10-10T12:00:00Z",
+                    }
+                )
+            if service == "notebook" and path == "/experiments/2":
+                return adapter.validate_python(
+                    {
+                        "id": 2,
+                        "organization_id": organization_id,
+                        "project_id": 5,
+                        "name": "Pilot",
+                        "description": "",
+                        "status": "in_progress",
+                        "created_at": "2026-10-10T12:00:00Z",
+                        "updated_at": "2026-10-10T12:00:00Z",
+                    }
+                )
+            assert service == "projects"
+            assert path == "/projects/5/access"
+            return adapter.validate_python({"project_id": 5, "role": "viewer"})
+
+        async def put(self, *args, **kwargs):
+            raise AssertionError("Viewer tag update reached the Notebook service.")
+
+    app = FastAPI()
+    app.include_router(notebook_router)
+    app.dependency_overrides[get_service_client] = lambda: ViewerClient()
+    client = TestClient(app)
+    token = create_access_token(
+        user_id=9,
+        organization_id=303,
+        role="member",
+        secret=b"test-signing-secret-that-is-at-least-32-bytes",
+    )
+    response = client.put(
+        "/api/records/entry/7/tags",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"entity_type": "entry", "tags": ["confidential"]},
+    )
+    assert response.status_code == 403
+
+
+def test_project_export_supports_json_and_csv_with_access_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ELN_JWT_SECRET", "test-signing-secret-that-is-at-least-32-bytes")
+
+    class ExportClient:
+        async def get(
+            self,
+            service: str,
+            path: str,
+            adapter: TypeAdapter,
+            *,
+            organization_id: int,
+            user_id: int | None = None,
+            organization_role: str | None = None,
+        ):
+            if service == "projects" and path == "/projects/5/access":
+                return adapter.validate_python({"project_id": 5, "role": "owner"})
+            if service == "projects" and path == "/projects/5":
+                return adapter.validate_python(
+                    {
+                        "id": 5,
+                        "organization_id": organization_id,
+                        "name": "Cell study",
+                        "description": "",
+                        "created_at": "2026-10-10T12:00:00Z",
+                    }
+                )
+            if service == "notebook" and path == "/projects/5/experiments":
+                return adapter.validate_python(
+                    [
+                        {
+                            "id": 2,
+                            "organization_id": organization_id,
+                            "project_id": 5,
+                            "name": "Pilot",
+                            "description": "",
+                            "status": "completed",
+                            "created_at": "2026-10-10T12:00:00Z",
+                            "updated_at": "2026-10-11T12:00:00Z",
+                        }
+                    ]
+                )
+            if service == "notebook" and path == "/projects/5/tasks":
+                return adapter.validate_python([])
+            if service == "notebook" and path == "/projects/5/tags":
+                return adapter.validate_python(
+                    [
+                        {
+                            "entity_type": "experiment",
+                            "entity_id": 2,
+                            "tags": ["pilot"],
+                        },
+                        {
+                            "entity_type": "entry",
+                            "entity_id": 7,
+                            "tags": ["assay"],
+                        },
+                    ]
+                )
+            if service == "notebook" and path == "/entries/7/attachments":
+                return adapter.validate_python(
+                    [
+                        {
+                            "id": 50,
+                            "organization_id": organization_id,
+                            "entry_id": 7,
+                            "original_filename": "result.txt",
+                            "media_type": "text/plain",
+                            "size_bytes": 8,
+                            "sha256": "0" * 64,
+                            "uploaded_by_user_id": 9,
+                            "created_at": "2026-10-10T12:00:00Z",
+                        }
+                    ]
+                )
+            assert service == "notebook"
+            assert path == "/experiments/2/entries"
+            return adapter.validate_python(
+                [
+                    {
+                        "id": 7,
+                        "experiment_id": 2,
+                        "title": "Day one",
+                        "content": 'Measured, then "confirmed".',
+                        "created_at": "2026-10-10T12:00:00Z",
+                        "updated_at": "2026-10-11T12:00:00Z",
+                    }
+                ]
+            )
+
+        async def get_bytes(
+            self, service: str, path: str, *, organization_id: int
+        ) -> bytes:
+            assert service == "notebook"
+            assert path == "/attachments/50/content"
+            return b"contents"
+
+    app = FastAPI()
+    app.include_router(projects_router)
+    app.dependency_overrides[get_service_client] = lambda: ExportClient()
+    client = TestClient(app)
+    token = create_access_token(
+        user_id=9,
+        organization_id=303,
+        role="member",
+        secret=b"test-signing-secret-that-is-at-least-32-bytes",
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+
+    json_response = client.get("/api/projects/5/export?format=json", headers=headers)
+    assert json_response.status_code == 200
+    assert json_response.json()["tasks"] == []
+    assert json_response.json()["experiments"][0]["entries"][0]["content"] == (
+        'Measured, then "confirmed".'
+    )
+    csv_response = client.get("/api/projects/5/export?format=csv", headers=headers)
+    assert csv_response.status_code == 200
+    assert "text/csv" in csv_response.headers["content-type"]
+    assert '"Measured, then ""confirmed""."' in csv_response.text
+    zip_response = client.get("/api/projects/5/export?format=zip", headers=headers)
+    assert zip_response.status_code == 200
+    with ZipFile(io.BytesIO(zip_response.content)) as archive:
+        project_export = json.loads(archive.read("project.json"))
+        assert project_export["tasks"] == []
+        assert project_export["experiments"][0]["tags"] == ["pilot"]
+        exported_entry = project_export["experiments"][0]["entries"][0]
+        assert exported_entry["tags"] == ["assay"]
+        assert exported_entry["attachments"][0]["original_filename"] == "result.txt"
+        assert archive.read("attachments/entry-7/50-result.txt") == b"contents"
+
+
+@pytest.mark.parametrize("with_attachment", [False, True])
+def test_project_import_accepts_json_and_safe_attachment_zip(
+    monkeypatch: pytest.MonkeyPatch, with_attachment: bool
+) -> None:
+    monkeypatch.setenv("ELN_JWT_SECRET", "test-signing-secret-that-is-at-least-32-bytes")
+    uploaded: list[bytes] = []
+    created_tasks: list[dict] = []
+    updated_task_statuses: list[str] = []
+
+    class ImportClient:
+        async def get(
+            self,
+            service: str,
+            path: str,
+            adapter: TypeAdapter,
+            *,
+            organization_id: int,
+            user_id: int | None = None,
+            organization_role: str | None = None,
+        ):
+            if path == "/projects/5/access":
+                return adapter.validate_python({"project_id": 5, "role": "owner"})
+            if path == "/projects/5":
+                return adapter.validate_python(
+                    {
+                        "id": 5,
+                        "organization_id": organization_id,
+                        "name": "Destination",
+                        "description": "",
+                        "created_at": "2026-10-10T12:00:00Z",
+                    }
+                )
+            raise AssertionError(f"Unexpected GET: {service} {path}")
+
+        async def post(
+            self,
+            service: str,
+            path: str,
+            payload: dict,
+            adapter: TypeAdapter,
+            *,
+            organization_id: int,
+            user_id: int | None = None,
+            organization_role: str | None = None,
+        ):
+            if path == "/projects/5/experiments":
+                return adapter.validate_python(
+                    {
+                        "id": 20,
+                        "organization_id": organization_id,
+                        "project_id": 5,
+                        "name": payload["name"],
+                        "description": payload["description"],
+                        "status": "in_progress",
+                        "created_at": "2026-10-10T12:00:00Z",
+                        "updated_at": "2026-10-10T12:00:00Z",
+                    }
+                )
+            if path == "/experiments/20/entries":
+                return adapter.validate_python(
+                    {
+                        "id": 30,
+                        "experiment_id": 20,
+                        "title": payload["title"],
+                        "content": payload["content"],
+                        "created_at": "2026-10-10T12:00:00Z",
+                        "updated_at": "2026-10-10T12:00:00Z",
+                    }
+                )
+            if path == "/projects/5/tasks":
+                created_tasks.append(payload)
+                return adapter.validate_python(
+                    {
+                        **payload,
+                        "id": 60,
+                        "organization_id": organization_id,
+                        "created_by_user_id": user_id,
+                        "status": "open",
+                        "created_at": "2026-10-10T12:00:00Z",
+                        "updated_at": "2026-10-10T12:00:00Z",
+                    }
+                )
+            raise AssertionError(f"Unexpected POST: {service} {path}")
+
+        async def patch(
+            self,
+            service: str,
+            path: str,
+            payload: dict,
+            adapter: TypeAdapter,
+            *,
+            organization_id: int,
+            user_id: int | None = None,
+            organization_role: str | None = None,
+        ):
+            assert service == "notebook"
+            assert path == "/tasks/60/status"
+            updated_task_statuses.append(payload["status"])
+            return adapter.validate_python(
+                {
+                    **created_tasks[0],
+                    "id": 60,
+                    "organization_id": organization_id,
+                    "created_by_user_id": user_id,
+                    "status": payload["status"],
+                    "created_at": "2026-10-10T12:00:00Z",
+                    "updated_at": "2026-10-10T12:00:00Z",
+                }
+            )
+
+        async def post_bytes(
+            self,
+            service: str,
+            path: str,
+            content: bytes,
+            adapter: TypeAdapter,
+            *,
+            organization_id: int,
+            user_id: int,
+            content_type: str,
+        ):
+            uploaded.append(content)
+            return adapter.validate_python(
+                {
+                    "id": 40,
+                    "organization_id": organization_id,
+                    "entry_id": 30,
+                    "original_filename": "result.txt",
+                    "media_type": content_type,
+                    "size_bytes": len(content),
+                    "sha256": "0" * 64,
+                    "uploaded_by_user_id": user_id,
+                    "created_at": "2026-10-10T12:00:00Z",
+                }
+            )
+
+    app = FastAPI()
+    app.include_router(projects_router)
+    app.dependency_overrides[get_service_client] = lambda: ImportClient()
+    client = TestClient(app)
+    token = create_access_token(
+        user_id=9,
+        organization_id=303,
+        role="member",
+        secret=b"test-signing-secret-that-is-at-least-32-bytes",
+    )
+    document = {
+        "project": {"name": "Source project", "description": ""},
+        "experiments": [
+            {
+                "experiment": {"id": 2, "name": "Pilot", "description": ""},
+                "entries": [
+                    {
+                        "title": "Day one",
+                        "content": "Imported notes",
+                        "attachments": (
+                            [
+                                {
+                                    "archive_path": "attachments/entry-1/1-result.txt",
+                                    "original_filename": "result.txt",
+                                    "media_type": "text/plain",
+                                }
+                            ]
+                            if with_attachment
+                            else []
+                        ),
+                    }
+                ],
+            }
+        ],
+        "tasks": [
+            {
+                "experiment_id": 2,
+                "title": "Review results",
+                "description": "Check the imported measurements.",
+                "due_at": "2026-10-12T12:00:00Z",
+                "priority": "high",
+                "status": "blocked",
+            }
+        ],
+    }
+    if with_attachment:
+        bundle = io.BytesIO()
+        with ZipFile(bundle, "w", compression=ZIP_DEFLATED) as archive:
+            archive.writestr("project.json", json.dumps(document))
+            archive.writestr("attachments/entry-1/1-result.txt", b"contents")
+        upload = bundle.getvalue()
+        filename = "export.zip"
+    else:
+        upload = json.dumps(document).encode("utf-8")
+        filename = "export.json"
+    response = client.post(
+        "/api/projects/5/import",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": (filename, upload, "application/octet-stream")},
+    )
+    assert response.status_code == 201, response.text
+    assert response.json() == {
+        "project_id": 5,
+        "experiments_imported": 1,
+        "entries_imported": 1,
+        "attachments_imported": int(with_attachment),
+        "tasks_imported": 1,
+    }
+    assert created_tasks[0]["experiment_id"] == 20
+    assert created_tasks[0]["assigned_to_user_id"] is None
+    assert updated_task_statuses == ["blocked"]
+    assert uploaded == ([b"contents"] if with_attachment else [])
 
 
 def test_gateway_requires_access_token_and_uses_token_organization(

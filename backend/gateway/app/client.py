@@ -87,6 +87,28 @@ class ServiceClient:
             json=payload,
         )
 
+    async def patch(
+        self,
+        service: ServiceName,
+        path: str,
+        payload: dict,
+        adapter: TypeAdapter[ResponseT],
+        *,
+        organization_id: int,
+        user_id: int | None = None,
+        organization_role: str | None = None,
+    ) -> ResponseT:
+        return await self._request(
+            "PATCH",
+            service,
+            path,
+            adapter,
+            organization_id=organization_id,
+            user_id=user_id,
+            organization_role=organization_role,
+            json=payload,
+        )
+
     async def delete(
         self,
         service: ServiceName,

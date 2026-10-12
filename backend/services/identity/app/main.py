@@ -1,24 +1,24 @@
-import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from eln_common.database import Base, Database
+from eln_common.config import required_postgresql_url
+from eln_common.database import Database
 from eln_common.errors import register_domain_error_handlers
 
 from . import models
 from .router import create_router
 from .security import jwt_secret
 
-database = Database(os.getenv("IDENTITY_DATABASE_URL", "sqlite:///./data/identity.db"))
+database = Database(required_postgresql_url("IDENTITY_DATABASE_URL"))
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     jwt_secret()
     _ = models
-    database.create_schema()
+    database.assert_schema_is_current("identity")
     try:
         yield
     finally:

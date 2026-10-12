@@ -23,7 +23,7 @@ export interface InventoryItem {
   id: number;
   organization_id: number;
   name: string;
-  category: "reagent" | "consumable" | "equipment";
+  category: string;
   catalog_number: string;
   lot_number: string;
   expires_on: string | null;
@@ -34,6 +34,7 @@ export interface InventoryItem {
   notes: string;
   created_at: string;
   updated_at: string;
+  status: "active" | "archived";
 }
 
 export interface SampleRecord {
@@ -48,6 +49,7 @@ export interface SampleRecord {
   description: string;
   created_by_user_id: number;
   created_at: string;
+  status: "active" | "archived";
 }
 
 export interface NotebookTemplate {
@@ -60,6 +62,7 @@ export interface NotebookTemplate {
   sections: { title: string; instructions: string; required: boolean }[];
   created_at: string;
   updated_at: string;
+  status: "active" | "archived";
 }
 
 export interface EntryAttachment {
@@ -75,7 +78,14 @@ export interface EntryAttachment {
 }
 
 export interface SearchHit {
-  entity_type: "project" | "experiment" | "entry" | "inventory" | "sample" | "template";
+  entity_type:
+    | "project"
+    | "experiment"
+    | "entry"
+    | "inventory"
+    | "sample"
+    | "template"
+    | "equipment";
   entity_id: number;
   title: string;
   detail: string;
@@ -88,8 +98,10 @@ export interface EquipmentResource {
   name: string;
   description: string;
   location: string;
+  category: string;
   created_by_user_id: number;
   created_at: string;
+  status: "active" | "archived";
 }
 
 export interface EquipmentBooking {
@@ -134,6 +146,48 @@ export interface EntryRevision {
   content: string;
   changed_by_user_id: number;
   created_at: string;
+}
+
+export interface RecordTagSet {
+  entity_type: "experiment" | "entry" | "inventory" | "sample" | "equipment" | "template";
+  entity_id: number;
+  tags: string[];
+}
+
+export interface LabTask {
+  id: number;
+  organization_id: number;
+  project_id: number;
+  experiment_id: number | null;
+  assigned_to_user_id: number | null;
+  created_by_user_id: number;
+  title: string;
+  description: string;
+  due_at: string | null;
+  priority: "low" | "normal" | "high" | "urgent";
+  status: "open" | "in_progress" | "blocked" | "completed" | "cancelled";
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RecordSignature {
+  id: number;
+  organization_id: number;
+  entity_type: string;
+  entity_id: number;
+  signed_by_user_id: number;
+  meaning: "authored" | "reviewed" | "approved";
+  comment: string;
+  record_sha256: string;
+  previous_hash: string;
+  event_hash: string;
+  created_at: string;
+}
+
+export interface AuditVerification {
+  organization_id: number;
+  valid: boolean;
+  checked_events: number;
 }
 
 export interface ActivityEvent {

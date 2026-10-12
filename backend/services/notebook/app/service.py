@@ -1,22 +1,30 @@
 import hashlib
+import hmac
+import json
+import os
 import re
 from decimal import Decimal
-from datetime import timezone
+from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
 from eln_common.errors import EntityNotFoundError, InvalidInputError
 from eln_common.outbox import enqueue_event
 
+from eln_common.errors import ServiceUnavailableError
+
 from .models import (
     EntryAttachment,
     EntryRevision,
+    AuditEvent,
     EquipmentBooking,
     EquipmentResource,
     Experiment,
     InventoryItem,
+    LabTask,
     NotebookEntry,
     NotebookTemplate,
+    RecordSignature,
     Sample,
     StockMovement,
 )
@@ -48,6 +56,36 @@ class NotebookService:
             raise EntityNotFoundError("Experiment not found.")
         return experiment
 
+    def update_experiment_status(
+        self,
+        organization_id: int,
+        experiment_id: int,
+        user_id: int,
+        status: str,
+    ) -> Experiment:
+        experiment = self.get_experiment(organization_id, experiment_id)
+        if status not in {"in_progress", "completed", "archived"}:
+            raise InvalidInputError("Experiment status is invalid.")
+        if experiment.status == status:
+            return experiment
+        experiment.status = status
+        enqueue_event(
+            self._db,
+            source_service="notebook",
+            action="status_changed",
+            entity_type="experiment",
+            entity_id=experiment.id,
+            organization_id=organization_id,
+            details={
+                "project_id": str(experiment.project_id),
+                "status": status,
+                "changed_by_user_id": str(user_id),
+            },
+        )
+        self._db.commit()
+        self._db.refresh(experiment)
+        return experiment
+
     def create_experiment(
         self, organization_id: int, project_id: int, name: str, description: str
     ) -> Experiment:
@@ -75,6 +113,343 @@ class NotebookService:
         self._db.refresh(experiment)
         return experiment
 
+    def create_task(
+        self, organization_id: int, user_id: int, values: dict
+    ) -> LabTask:
+        title = values["title"].strip()
+        if not title:
+            raise InvalidInputError("Task title cannot be blank.")
+        experiment_id = values.get("experiment_id")
+        if experiment_id is not None:
+            experiment = self._repository.get_experiment(
+                organization_id, experiment_id
+            )
+            if experiment is None or experiment.project_id != values["project_id"]:
+                raise EntityNotFoundError("Experiment not found in this project.")
+        task = self._repository.add_task(
+            LabTask(
+                organization_id=organization_id,
+                created_by_user_id=user_id,
+                **{**values, "title": title},
+            )
+        )
+        enqueue_event(
+            self._db,
+            source_service="notebook",
+            action="task_created",
+            entity_type="lab_task",
+            entity_id=task.id,
+            organization_id=organization_id,
+            details={
+                "project_id": str(task.project_id),
+                "title": task.title,
+                "created_by_user_id": str(user_id),
+            },
+        )
+        self._db.commit()
+        self._db.refresh(task)
+        return task
+
+    def list_tasks(self, organization_id: int, project_id: int) -> list[LabTask]:
+        return self._repository.list_tasks(organization_id, project_id)
+
+    def get_task(self, organization_id: int, task_id: int) -> LabTask:
+        task = self._repository.get_task(organization_id, task_id)
+        if task is None:
+            raise EntityNotFoundError("Task not found.")
+        return task
+
+    def update_task_status(
+        self, organization_id: int, task_id: int, user_id: int, status: str
+    ) -> LabTask:
+        task = self._repository.get_task(organization_id, task_id)
+        if task is None:
+            raise EntityNotFoundError("Task not found.")
+        if status not in {"open", "in_progress", "blocked", "completed", "cancelled"}:
+            raise InvalidInputError("Task status is invalid.")
+        if task.status != status:
+            task.status = status
+            enqueue_event(
+                self._db,
+                source_service="notebook",
+                action="task_status_changed",
+                entity_type="lab_task",
+                entity_id=task.id,
+                organization_id=organization_id,
+                details={
+                    "project_id": str(task.project_id),
+                    "status": status,
+                    "changed_by_user_id": str(user_id),
+                },
+            )
+            self._db.commit()
+            self._db.refresh(task)
+        return task
+
+    def update_resource_status(
+        self,
+        organization_id: int,
+        entity_type: str,
+        entity_id: int,
+        user_id: int,
+        status: str,
+    ):
+        if status not in {"active", "archived"}:
+            raise InvalidInputError("Resource status is invalid.")
+        resource_map = {
+            "inventory": (InventoryItem, "Inventory item not found."),
+            "sample": (Sample, "Sample not found."),
+            "equipment": (EquipmentResource, "Equipment not found."),
+            "template": (NotebookTemplate, "Notebook template not found."),
+        }
+        resource = resource_map.get(entity_type)
+        if resource is None:
+            raise InvalidInputError("Unsupported resource type.")
+        model, not_found_message = resource
+        record = self._db.get(model, entity_id)
+        if record is None or record.organization_id != organization_id:
+            raise EntityNotFoundError(not_found_message)
+        if (
+            entity_type == "equipment"
+            and status == "archived"
+            and self._repository.has_active_equipment_bookings(
+                organization_id, entity_id
+            )
+        ):
+            raise InvalidInputError(
+                "Equipment with current or upcoming reservations cannot be archived."
+            )
+        if record.status != status:
+            record.status = status
+            enqueue_event(
+                self._db,
+                source_service="notebook",
+                action=f"{entity_type}_{status}",
+                entity_type=entity_type,
+                entity_id=entity_id,
+                organization_id=organization_id,
+                details={"changed_by_user_id": str(user_id)},
+            )
+            self._db.commit()
+            self._db.refresh(record)
+        return record
+
+    def get_resource(self, organization_id: int, entity_type: str, entity_id: int):
+        messages = {
+            "inventory": "Inventory item not found.",
+            "sample": "Sample not found.",
+            "equipment": "Equipment not found.",
+            "template": "Notebook template not found.",
+        }
+        if entity_type not in messages:
+            raise InvalidInputError("Unsupported resource type.")
+        resource = self._repository.get_resource(
+            organization_id, entity_type, entity_id
+        )
+        if resource is None:
+            raise EntityNotFoundError(messages[entity_type])
+        return resource
+
+    def create_signature(
+        self,
+        organization_id: int,
+        user_id: int,
+        entry_id: int,
+        meaning: str,
+        comment: str,
+    ) -> RecordSignature:
+        key = os.getenv("ELN_AUDIT_HMAC_KEY", "")
+        if len(key.encode("utf-8")) < 32:
+            raise ServiceUnavailableError(
+                "Audit signing is unavailable; configure ELN_AUDIT_HMAC_KEY "
+                "with at least 32 bytes."
+            )
+        entry = self.get_entry(organization_id, entry_id)
+        timestamp = datetime.now(timezone.utc)
+        record_payload = json.dumps(
+            {
+                "entry_id": entry.id,
+                "title": entry.title,
+                "content": entry.content,
+                "updated_at": entry.updated_at.isoformat(),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        record_digest = hashlib.sha256(record_payload).hexdigest()
+        head = self._repository.get_audit_head(organization_id)
+        previous_hash = head.event_hash if head else "0" * 64
+        signature_payload = {
+            "organization_id": organization_id,
+            "entity_type": "entry",
+            "entity_id": entry_id,
+            "signed_by_user_id": user_id,
+            "meaning": meaning,
+            "comment": comment.strip(),
+            "record_sha256": record_digest,
+            "previous_hash": previous_hash,
+            "created_at": timestamp,
+        }
+        signature_hash_payload = {
+            **signature_payload,
+            "created_at": timestamp.isoformat(),
+        }
+        canonical_signature = json.dumps(
+            signature_hash_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        event_hash = hmac.new(
+            key.encode("utf-8"), canonical_signature.encode("utf-8"), hashlib.sha256
+        ).hexdigest()
+        signature = self._repository.add_signature(
+            RecordSignature(
+                **signature_payload,
+                event_hash=event_hash,
+            )
+        )
+        serialized_signature_payload = {
+            **signature_hash_payload,
+        }
+        audit_payload = json.dumps(
+            {"signature_id": signature.id, **serialized_signature_payload},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        audit_hash = hmac.new(
+            key.encode("utf-8"),
+            json.dumps(
+                {
+                    "organization_id": organization_id,
+                    "actor_user_id": user_id,
+                    "action": "record_signed",
+                    "entity_type": "entry",
+                    "entity_id": entry_id,
+                    "payload_json": audit_payload,
+                    "previous_hash": previous_hash,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        self._repository.add_audit_event(
+            AuditEvent(
+                organization_id=organization_id,
+                actor_user_id=user_id,
+                action="record_signed",
+                entity_type="entry",
+                entity_id=entry_id,
+                payload_json=audit_payload,
+                previous_hash=previous_hash,
+                event_hash=audit_hash,
+                created_at=timestamp,
+            )
+        )
+        self._db.commit()
+        self._db.refresh(signature)
+        return signature
+
+    def list_signatures(
+        self, organization_id: int, entry_id: int
+    ) -> list[RecordSignature]:
+        self.get_entry(organization_id, entry_id)
+        return self._repository.list_signatures(organization_id, "entry", entry_id)
+
+    def verify_audit_chain(self, organization_id: int) -> dict[str, int | bool]:
+        key = os.getenv("ELN_AUDIT_HMAC_KEY", "")
+        if len(key.encode("utf-8")) < 32:
+            raise ServiceUnavailableError(
+                "Audit verification is unavailable; configure ELN_AUDIT_HMAC_KEY "
+                "with at least 32 bytes."
+            )
+        events = self._repository.list_audit_events(organization_id)
+        previous_hash = "0" * 64
+        for event in events:
+            if event.previous_hash != previous_hash:
+                return {
+                    "organization_id": organization_id,
+                    "valid": False,
+                    "checked_events": len(events),
+                }
+            if event.action == "record_signed":
+                try:
+                    signed_payload = json.loads(event.payload_json)
+                    signature_id = int(signed_payload.pop("signature_id"))
+                except (ValueError, TypeError, json.JSONDecodeError, KeyError):
+                    return {
+                        "organization_id": organization_id,
+                        "valid": False,
+                        "checked_events": len(events),
+                    }
+                signature = self._repository.get_signature(
+                    organization_id, signature_id
+                )
+                signature_canonical = json.dumps(
+                    signed_payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                )
+                expected_signature_hash = hmac.new(
+                    key.encode("utf-8"),
+                    signature_canonical.encode("utf-8"),
+                    hashlib.sha256,
+                ).hexdigest()
+                if (
+                    signature is None
+                    or not hmac.compare_digest(
+                        expected_signature_hash, signature.event_hash
+                    )
+                    or signature.entity_id != event.entity_id
+                    or signature.signed_by_user_id != event.actor_user_id
+                    or signature.organization_id
+                    != signed_payload.get("organization_id")
+                    or signature.entity_type != signed_payload.get("entity_type")
+                    or signature.meaning != signed_payload.get("meaning")
+                    or signature.comment != signed_payload.get("comment")
+                    or signature.record_sha256
+                    != signed_payload.get("record_sha256")
+                    or signature.previous_hash
+                    != signed_payload.get("previous_hash")
+                ):
+                    return {
+                        "organization_id": organization_id,
+                        "valid": False,
+                        "checked_events": len(events),
+                    }
+            payload = json.dumps(
+                {
+                    "organization_id": event.organization_id,
+                    "actor_user_id": event.actor_user_id,
+                    "action": event.action,
+                    "entity_type": event.entity_type,
+                    "entity_id": event.entity_id,
+                    "payload_json": event.payload_json,
+                    "previous_hash": event.previous_hash,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            expected_hash = hmac.new(
+                key.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256
+            ).hexdigest()
+            if not hmac.compare_digest(expected_hash, event.event_hash):
+                return {
+                    "organization_id": organization_id,
+                    "valid": False,
+                    "checked_events": len(events),
+                }
+            previous_hash = event.event_hash
+        return {
+            "organization_id": organization_id,
+            "valid": True,
+            "checked_events": len(events),
+        }
+
     def list_entries(
         self, organization_id: int, experiment_id: int
     ) -> list[NotebookEntry]:
@@ -86,6 +461,96 @@ class NotebookService:
         if entry is None:
             raise EntityNotFoundError("Notebook entry not found.")
         return entry
+
+    def get_record_tags(
+        self, organization_id: int, entity_type: str, entity_id: int
+    ) -> dict:
+        supported_types = {
+            "experiment",
+            "entry",
+            "inventory",
+            "sample",
+            "equipment",
+            "template",
+        }
+        if entity_type not in supported_types:
+            raise InvalidInputError("Unsupported tagged record type.")
+        exists, _ = self._repository.record_tag_target(
+            organization_id, entity_type, entity_id
+        )
+        if not exists:
+            raise EntityNotFoundError("Tagged record not found.")
+        return {
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "tags": self._repository.list_record_tags(
+                organization_id, entity_type, entity_id
+            ),
+        }
+
+    def replace_record_tags(
+        self,
+        organization_id: int,
+        entity_type: str,
+        entity_id: int,
+        user_id: int,
+        tags: list[str],
+    ) -> dict:
+        if entity_type not in {
+            "experiment",
+            "entry",
+            "inventory",
+            "sample",
+            "equipment",
+            "template",
+        }:
+            raise InvalidInputError("Unsupported tagged record type.")
+        exists, project_id = self._repository.record_tag_target(
+            organization_id, entity_type, entity_id
+        )
+        if not exists:
+            raise EntityNotFoundError("Tagged record not found.")
+        normalized_tags = sorted({tag.strip().casefold() for tag in tags})
+        if any(not tag or len(tag) > 40 for tag in normalized_tags):
+            raise InvalidInputError("Tags must contain 1 to 40 characters.")
+        self._repository.replace_record_tags(
+            organization_id, entity_type, entity_id, user_id, normalized_tags
+        )
+        enqueue_event(
+            self._db,
+            source_service="notebook",
+            action="tags_updated",
+            entity_type=f"notebook_{entity_type}",
+            entity_id=entity_id,
+            organization_id=organization_id,
+            details={
+                "project_id": str(project_id),
+                "tags": ",".join(normalized_tags),
+                "changed_by_user_id": str(user_id),
+            },
+        )
+        self._db.commit()
+        return {
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "tags": self._repository.list_record_tags(
+                organization_id, entity_type, entity_id
+            ),
+        }
+
+    def list_project_record_tags(
+        self, organization_id: int, project_id: int
+    ) -> list[dict]:
+        return [
+            {
+                "entity_type": entity_type,
+                "entity_id": entity_id,
+                "tags": tags,
+            }
+            for (entity_type, entity_id), tags in self._repository.list_project_record_tags(
+                organization_id, project_id
+            ).items()
+        ]
 
     def create_entry(
         self, organization_id: int, experiment_id: int, title: str, content: str
@@ -207,12 +672,15 @@ class NotebookService:
     ) -> InventoryItem:
         name = values["name"].strip()
         unit = values["unit"].strip()
-        if not name or not unit:
-            raise InvalidInputError("Inventory item name and unit cannot be blank.")
+        category = values["category"].strip()
+        if not name or not unit or not category:
+            raise InvalidInputError(
+                "Inventory item name, category, and unit cannot be blank."
+            )
         item = self._repository.add_inventory_item(
             InventoryItem(
                 organization_id=organization_id,
-                **{**values, "name": name, "unit": unit},
+                **{**values, "name": name, "category": category, "unit": unit},
             )
         )
         if item.quantity > 0:
@@ -250,6 +718,8 @@ class NotebookService:
         item = self._repository.get_inventory_item(organization_id, item_id)
         if item is None:
             raise EntityNotFoundError("Inventory item not found.")
+        if item.status != "active":
+            raise InvalidInputError("Archived inventory items cannot be adjusted.")
         normalized_reason = reason.strip()
         if not normalized_reason or quantity_delta == 0:
             raise InvalidInputError("A non-zero quantity change and reason are required.")
@@ -403,6 +873,8 @@ class NotebookService:
         template = self._repository.get_template(organization_id, template_id)
         if template is None:
             raise EntityNotFoundError("Notebook template not found.")
+        if template.status != "active":
+            raise InvalidInputError("Archived templates cannot be applied.")
         if template.template_kind != "entry":
             raise InvalidInputError("Only entry templates can be applied to an entry.")
         self._repository.add_revision(
@@ -446,6 +918,8 @@ class NotebookService:
         template = self._repository.get_template(organization_id, template_id)
         if template is None:
             raise EntityNotFoundError("Notebook template not found.")
+        if template.status != "active":
+            raise InvalidInputError("Archived templates cannot start protocols.")
         if template.template_kind != "protocol":
             raise InvalidInputError("Selected template is not a protocol.")
         experiment = self._repository.add_experiment(
@@ -593,6 +1067,8 @@ class NotebookService:
         )
         if equipment is None:
             raise EntityNotFoundError("Equipment not found.")
+        if equipment.status != "active":
+            raise InvalidInputError("Archived equipment cannot be booked.")
         starts_at = values["starts_at"].astimezone(timezone.utc)
         ends_at = values["ends_at"].astimezone(timezone.utc)
         if self._repository.has_booking_conflict(

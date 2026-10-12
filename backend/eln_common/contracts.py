@@ -43,6 +43,10 @@ class ExperimentCreate(BaseModel):
     description: str = Field(default="", max_length=5000)
 
 
+class ExperimentStatusUpdate(BaseModel):
+    status: Literal["in_progress", "completed", "archived"]
+
+
 class ExperimentRead(ExperimentCreate):
     model_config = ConfigDict(from_attributes=True)
 
@@ -64,6 +68,59 @@ class EntryUpdate(BaseModel):
     content: str = Field(max_length=100_000)
 
 
+class ProjectImportAttachment(BaseModel):
+    archive_path: str = Field(min_length=1, max_length=512)
+    original_filename: str = Field(min_length=1, max_length=255)
+    media_type: str = Field(default="application/octet-stream", max_length=160)
+
+
+class ProjectImportEntry(EntryCreate):
+    tags: list[str] = Field(default_factory=list, max_length=20)
+    attachments: list[ProjectImportAttachment] = Field(default_factory=list, max_length=100)
+
+
+class ProjectImportExperimentInfo(ExperimentCreate):
+    id: int | None = Field(default=None, gt=0)
+    status: Literal["in_progress", "completed", "archived"] = "in_progress"
+
+
+class ProjectImportExperiment(BaseModel):
+    experiment: ProjectImportExperimentInfo
+    tags: list[str] = Field(default_factory=list, max_length=20)
+    entries: list[ProjectImportEntry] = Field(default_factory=list, max_length=5000)
+
+
+class ProjectImportTask(BaseModel):
+    experiment_id: int | None = Field(default=None, gt=0)
+    title: str = Field(min_length=1, max_length=200)
+    description: str = Field(default="", max_length=5000)
+    due_at: datetime | None = None
+    priority: Literal["low", "normal", "high", "urgent"] = "normal"
+    status: Literal["open", "in_progress", "blocked", "completed", "cancelled"] = "open"
+
+    @field_validator("due_at")
+    @classmethod
+    def validate_due_at_timezone(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("Task due date must include a timezone.")
+        return value
+
+
+class ProjectImportPayload(BaseModel):
+    format_version: Literal[1] = 1
+    project: ProjectCreate
+    experiments: list[ProjectImportExperiment] = Field(max_length=1000)
+    tasks: list[ProjectImportTask] = Field(default_factory=list, max_length=5000)
+
+
+class ProjectImportResult(BaseModel):
+    project_id: int
+    experiments_imported: int
+    entries_imported: int
+    attachments_imported: int
+    tasks_imported: int
+
+
 class EntryRead(EntryCreate):
     model_config = ConfigDict(from_attributes=True)
 
@@ -71,6 +128,21 @@ class EntryRead(EntryCreate):
     experiment_id: int
     created_at: datetime
     updated_at: datetime
+
+
+class RecordTagSetUpdate(BaseModel):
+    entity_type: Literal[
+        "experiment", "entry", "inventory", "sample", "equipment", "template"
+    ]
+    tags: list[str] = Field(max_length=20)
+
+
+class RecordTagSetRead(BaseModel):
+    entity_type: Literal[
+        "experiment", "entry", "inventory", "sample", "equipment", "template"
+    ]
+    entity_id: int
+    tags: list[str]
 
 
 class EntryRevisionRead(BaseModel):
@@ -92,7 +164,7 @@ class EntryRevisionRestore(BaseModel):
 
 class InventoryItemCreate(BaseModel):
     name: str = Field(min_length=1, max_length=160)
-    category: Literal["reagent", "consumable", "equipment"] = "reagent"
+    category: str = Field(default="reagent", min_length=1, max_length=64)
     catalog_number: str = Field(default="", max_length=120)
     lot_number: str = Field(default="", max_length=120)
     expires_on: date | None = None
@@ -112,6 +184,7 @@ class InventoryItemRead(InventoryItemCreate):
     organization_id: int
     created_at: datetime
     updated_at: datetime
+    status: Literal["active", "archived"]
 
 
 class StockAdjustment(BaseModel):
@@ -151,6 +224,7 @@ class SampleRead(SampleCreate):
     organization_id: int
     created_by_user_id: int
     created_at: datetime
+    status: Literal["active", "archived"]
 
 
 class TemplateSection(BaseModel):
@@ -178,6 +252,11 @@ class NotebookTemplateRead(NotebookTemplateCreate):
     created_by_user_id: int
     created_at: datetime
     updated_at: datetime
+    status: Literal["active", "archived"]
+
+
+class ResourceStatusUpdate(BaseModel):
+    status: Literal["active", "archived"]
 
 
 class AttachmentRead(BaseModel):
@@ -202,6 +281,7 @@ class SearchHit(BaseModel):
         "inventory",
         "sample",
         "template",
+        "equipment",
     ]
     entity_id: int
     title: str
@@ -213,6 +293,7 @@ class EquipmentCreate(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     description: str = Field(default="", max_length=5000)
     location: str = Field(default="", max_length=200)
+    category: str = Field(default="equipment", min_length=1, max_length=64)
 
 
 class EquipmentRead(EquipmentCreate):
@@ -222,6 +303,68 @@ class EquipmentRead(EquipmentCreate):
     organization_id: int
     created_by_user_id: int
     created_at: datetime
+    status: Literal["active", "archived"]
+
+
+class TaskCreate(BaseModel):
+    project_id: int = Field(gt=0)
+    experiment_id: int | None = Field(default=None, gt=0)
+    assigned_to_user_id: int | None = Field(default=None, gt=0)
+    title: str = Field(min_length=1, max_length=200)
+    description: str = Field(default="", max_length=5000)
+    due_at: datetime | None = None
+    priority: Literal["low", "normal", "high", "urgent"] = "normal"
+
+    @field_validator("due_at")
+    @classmethod
+    def validate_due_at_timezone(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("Task due date must include a timezone.")
+        return value
+
+
+class TaskStatusUpdate(BaseModel):
+    status: Literal["open", "in_progress", "blocked", "completed", "cancelled"]
+
+
+class TaskRead(TaskCreate):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    organization_id: int
+    created_by_user_id: int
+    status: Literal["open", "in_progress", "blocked", "completed", "cancelled"]
+    created_at: datetime
+    updated_at: datetime
+
+
+class RecordSignatureCreate(BaseModel):
+    entity_type: Literal["entry"]
+    entity_id: int = Field(gt=0)
+    meaning: Literal["authored", "reviewed", "approved"]
+    comment: str = Field(default="", max_length=500)
+
+
+class RecordSignatureRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    organization_id: int
+    entity_type: str
+    entity_id: int
+    signed_by_user_id: int
+    meaning: str
+    comment: str
+    record_sha256: str
+    previous_hash: str
+    event_hash: str
+    created_at: datetime
+
+
+class AuditVerificationRead(BaseModel):
+    organization_id: int
+    valid: bool
+    checked_events: int
 
 
 class EquipmentBookingCreate(BaseModel):

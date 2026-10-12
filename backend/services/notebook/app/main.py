@@ -12,14 +12,14 @@ from .attachment_storage import AttachmentStorage
 from . import models
 from .router import create_router
 
-settings = ServiceSettings.for_service("notebook", "sqlite:///./data/notebook.db")
+settings = ServiceSettings.for_service("notebook")
 database = Database(settings.database_url)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     _ = models, OutboxEvent
-    database.create_schema()
+    database.assert_schema_is_current("notebook")
     AttachmentStorage().prepare()
     publisher = OutboxPublisher(database, settings.activity_service_url)
     publisher_task = asyncio.create_task(publisher.run())

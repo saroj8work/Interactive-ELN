@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from eln_common.contracts import (
+    AuditVerificationRead,
     AttachmentRead,
     EntryCreate,
     EntryRead,
@@ -25,19 +26,28 @@ from eln_common.contracts import (
     EquipmentRead,
     ExperimentCreate,
     ExperimentRead,
+    ExperimentStatusUpdate,
     InventoryItemCreate,
     InventoryItemRead,
     NotebookTemplateCreate,
     NotebookTemplateRead,
     NotebookTemplateUpdate,
+    RecordTagSetRead,
+    RecordTagSetUpdate,
+    RecordSignatureCreate,
+    RecordSignatureRead,
     SampleCreate,
     SampleRead,
+    ResourceStatusUpdate,
     SearchHit,
     StockAdjustment,
     StockMovementRead,
+    TaskCreate,
+    TaskRead,
+    TaskStatusUpdate,
 )
 from eln_common.database import Database
-from eln_common.errors import AuthenticationError
+from eln_common.errors import AuthenticationError, InvalidInputError
 
 from .repository import NotebookRepository
 from .service import NotebookService
@@ -87,6 +97,116 @@ def create_router(database: Database) -> APIRouter:
         organization_id: Annotated[int, Header(alias="X-Organization-ID")],
     ) -> list[EquipmentBookingRead]:
         return service.list_bookings(organization_id)
+
+    @router.get("/projects/{project_id}/tasks", response_model=list[TaskRead])
+    def list_tasks(
+        project_id: int,
+        service: Annotated[NotebookService, Depends(get_service)],
+        organization_id: Annotated[int, Header(alias="X-Organization-ID")],
+    ) -> list[TaskRead]:
+        return service.list_tasks(organization_id, project_id)
+
+    @router.post(
+        "/projects/{project_id}/tasks",
+        response_model=TaskRead,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_task(
+        project_id: int,
+        payload: TaskCreate,
+        service: Annotated[NotebookService, Depends(get_service)],
+        actor: Annotated[tuple[int, int, bool], Depends(actor_headers)],
+    ) -> TaskRead:
+        organization_id, user_id, _ = actor
+        if payload.project_id != project_id:
+            raise InvalidInputError("Task project does not match the request.")
+        return service.create_task(
+            organization_id, user_id, payload.model_dump()
+        )
+
+    @router.patch("/tasks/{task_id}/status", response_model=TaskRead)
+    def update_task_status(
+        task_id: int,
+        payload: TaskStatusUpdate,
+        service: Annotated[NotebookService, Depends(get_service)],
+        actor: Annotated[tuple[int, int, bool], Depends(actor_headers)],
+    ) -> TaskRead:
+        organization_id, user_id, _ = actor
+        return service.update_task_status(
+            organization_id, task_id, user_id, payload.status
+        )
+
+    @router.get("/tasks/{task_id}", response_model=TaskRead)
+    def get_task(
+        task_id: int,
+        service: Annotated[NotebookService, Depends(get_service)],
+        organization_id: Annotated[int, Header(alias="X-Organization-ID")],
+    ) -> TaskRead:
+        return service.get_task(organization_id, task_id)
+
+    @router.get(
+        "/resources/{entity_type}/{entity_id}",
+        response_model=InventoryItemRead | SampleRead | EquipmentRead | NotebookTemplateRead,
+    )
+    def get_resource(
+        entity_type: str,
+        entity_id: int,
+        service: Annotated[NotebookService, Depends(get_service)],
+        organization_id: Annotated[int, Header(alias="X-Organization-ID")],
+    ):
+        return service.get_resource(organization_id, entity_type, entity_id)
+
+    @router.patch(
+        "/resources/{entity_type}/{entity_id}/status",
+        response_model=InventoryItemRead | SampleRead | EquipmentRead | NotebookTemplateRead,
+    )
+    def update_resource_status(
+        entity_type: str,
+        entity_id: int,
+        payload: ResourceStatusUpdate,
+        service: Annotated[NotebookService, Depends(get_service)],
+        actor: Annotated[tuple[int, int, bool], Depends(actor_headers)],
+    ) -> InventoryItemRead | SampleRead | EquipmentRead | NotebookTemplateRead:
+        organization_id, user_id, _ = actor
+        return service.update_resource_status(
+            organization_id, entity_type, entity_id, user_id, payload.status
+        )
+
+    @router.post(
+        "/entries/{entry_id}/signatures",
+        response_model=RecordSignatureRead,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_entry_signature(
+        entry_id: int,
+        payload: RecordSignatureCreate,
+        service: Annotated[NotebookService, Depends(get_service)],
+        actor: Annotated[tuple[int, int, bool], Depends(actor_headers)],
+    ) -> RecordSignatureRead:
+        organization_id, user_id, _ = actor
+        if payload.entity_id != entry_id:
+            raise InvalidInputError("Signature entry does not match the request path.")
+        return service.create_signature(
+            organization_id, user_id, entry_id, payload.meaning, payload.comment
+        )
+
+    @router.get(
+        "/entries/{entry_id}/signatures",
+        response_model=list[RecordSignatureRead],
+    )
+    def list_entry_signatures(
+        entry_id: int,
+        service: Annotated[NotebookService, Depends(get_service)],
+        organization_id: Annotated[int, Header(alias="X-Organization-ID")],
+    ) -> list[RecordSignatureRead]:
+        return service.list_signatures(organization_id, entry_id)
+
+    @router.get("/audit/verify", response_model=AuditVerificationRead)
+    def verify_audit_chain(
+        service: Annotated[NotebookService, Depends(get_service)],
+        organization_id: Annotated[int, Header(alias="X-Organization-ID")],
+    ) -> AuditVerificationRead:
+        return service.verify_audit_chain(organization_id)
 
     @router.post(
         "/equipment/{equipment_id}/bookings",
@@ -306,6 +426,18 @@ def create_router(database: Database) -> APIRouter:
     ) -> ExperimentRead:
         return service.get_experiment(organization_id, experiment_id)
 
+    @router.patch("/experiments/{experiment_id}/status", response_model=ExperimentRead)
+    def update_experiment_status(
+        experiment_id: int,
+        payload: ExperimentStatusUpdate,
+        service: Annotated[NotebookService, Depends(get_service)],
+        actor: Annotated[tuple[int, int, bool], Depends(actor_headers)],
+    ) -> ExperimentRead:
+        organization_id, user_id, _ = actor
+        return service.update_experiment_status(
+            organization_id, experiment_id, user_id, payload.status
+        )
+
     @router.post(
         "/experiments/{experiment_id}/entries",
         response_model=EntryRead,
@@ -332,6 +464,51 @@ def create_router(database: Database) -> APIRouter:
         return service.update_entry(
             organization_id, entry_id, user_id, payload.title, payload.content
         )
+
+    @router.get(
+        "/records/{entity_type}/{entity_id}/tags",
+        response_model=RecordTagSetRead,
+    )
+    def get_record_tags(
+        entity_type: str,
+        entity_id: int,
+        service: Annotated[NotebookService, Depends(get_service)],
+        organization_id: Annotated[int, Header(alias="X-Organization-ID")],
+    ) -> RecordTagSetRead:
+        return service.get_record_tags(organization_id, entity_type, entity_id)
+
+    @router.put(
+        "/records/{entity_type}/{entity_id}/tags",
+        response_model=RecordTagSetRead,
+    )
+    def replace_record_tags(
+        entity_type: str,
+        entity_id: int,
+        payload: RecordTagSetUpdate,
+        service: Annotated[NotebookService, Depends(get_service)],
+        actor: Annotated[tuple[int, int, bool], Depends(actor_headers)],
+    ) -> RecordTagSetRead:
+        if payload.entity_type != entity_type:
+            raise InvalidInputError("Tagged record type does not match the request.")
+        organization_id, user_id, _ = actor
+        return service.replace_record_tags(
+            organization_id,
+            entity_type,
+            entity_id,
+            user_id,
+            payload.tags,
+        )
+
+    @router.get(
+        "/projects/{project_id}/tags",
+        response_model=list[RecordTagSetRead],
+    )
+    def list_project_record_tags(
+        project_id: int,
+        service: Annotated[NotebookService, Depends(get_service)],
+        organization_id: Annotated[int, Header(alias="X-Organization-ID")],
+    ) -> list[RecordTagSetRead]:
+        return service.list_project_record_tags(organization_id, project_id)
 
     @router.get(
         "/entries/{entry_id}/revisions",

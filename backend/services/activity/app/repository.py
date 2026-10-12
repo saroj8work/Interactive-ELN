@@ -1,6 +1,5 @@
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from .models import ActivityEvent
@@ -32,9 +31,7 @@ class ActivityRepository:
             "details": event.details,
         }
         dialect = self._db.get_bind().dialect.name
-        if dialect == "sqlite":
-            statement = sqlite_insert(ActivityEvent).values(**values)
-        elif dialect == "postgresql":
+        if dialect == "postgresql":
             statement = postgres_insert(ActivityEvent).values(**values)
         else:
             existing = self._db.scalar(

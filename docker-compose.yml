@@ -13,6 +13,18 @@ services:
       timeout: 3s
       retries: 10
 
+  identity-migrate:
+    working_dir: /app/backend
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.identity
+    command: ["python", "-m", "alembic", "-c", "migrations/identity/alembic.ini", "upgrade", "head"]
+    environment:
+      IDENTITY_DATABASE_URL: postgresql+psycopg://identity:identity_dev_only@identity-db:5432/identity
+    depends_on:
+      identity-db:
+        condition: service_healthy
+
   mailpit:
     image: axllent/mailpit:v1.21
     ports:
@@ -33,8 +45,8 @@ services:
       SMTP_FROM: eln@localhost
       PUBLIC_APP_URL: http://localhost:5173
     depends_on:
-      identity-db:
-        condition: service_healthy
+      identity-migrate:
+        condition: service_completed_successfully
       mailpit:
         condition: service_started
     ports:
@@ -59,6 +71,18 @@ services:
       timeout: 3s
       retries: 10
 
+  projects-migrate:
+    working_dir: /app/backend
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.projects
+    command: ["python", "-m", "alembic", "-c", "migrations/projects/alembic.ini", "upgrade", "head"]
+    environment:
+      PROJECTS_DATABASE_URL: postgresql+psycopg://projects:projects_dev_only@projects-db:5432/projects
+    depends_on:
+      projects-db:
+        condition: service_healthy
+
   notebook-db:
     image: postgres:16-alpine
     environment:
@@ -72,6 +96,18 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  notebook-migrate:
+    working_dir: /app/backend
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.notebook
+    command: ["python", "-m", "alembic", "-c", "migrations/notebook/alembic.ini", "upgrade", "head"]
+    environment:
+      NOTEBOOK_DATABASE_URL: postgresql+psycopg://notebook:notebook_dev_only@notebook-db:5432/notebook
+    depends_on:
+      notebook-db:
+        condition: service_healthy
 
   activity-db:
     image: postgres:16-alpine
@@ -87,15 +123,27 @@ services:
       timeout: 3s
       retries: 10
 
+  activity-migrate:
+    working_dir: /app/backend
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.activity
+    command: ["python", "-m", "alembic", "-c", "migrations/activity/alembic.ini", "upgrade", "head"]
+    environment:
+      ACTIVITY_DATABASE_URL: postgresql+psycopg://activity:activity_dev_only@activity-db:5432/activity
+    depends_on:
+      activity-db:
+        condition: service_healthy
+
   activity-service:
     build:
       context: .
       dockerfile: backend/Dockerfile.activity
     environment:
-      DATABASE_URL: postgresql+psycopg://activity:activity_dev_only@activity-db:5432/activity
+      ACTIVITY_DATABASE_URL: postgresql+psycopg://activity:activity_dev_only@activity-db:5432/activity
     depends_on:
-      activity-db:
-        condition: service_healthy
+      activity-migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8003/health', timeout=2)"]
       interval: 5s
@@ -107,11 +155,11 @@ services:
       context: .
       dockerfile: backend/Dockerfile.projects
     environment:
-      DATABASE_URL: postgresql+psycopg://projects:projects_dev_only@projects-db:5432/projects
+      PROJECTS_DATABASE_URL: postgresql+psycopg://projects:projects_dev_only@projects-db:5432/projects
       ACTIVITY_SERVICE_URL: http://activity-service:8003
     depends_on:
-      projects-db:
-        condition: service_healthy
+      projects-migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=2)"]
       interval: 5s
@@ -123,14 +171,15 @@ services:
       context: .
       dockerfile: backend/Dockerfile.notebook
     environment:
-      DATABASE_URL: postgresql+psycopg://notebook:notebook_dev_only@notebook-db:5432/notebook
+      NOTEBOOK_DATABASE_URL: postgresql+psycopg://notebook:notebook_dev_only@notebook-db:5432/notebook
       ACTIVITY_SERVICE_URL: http://activity-service:8003
       ELN_ATTACHMENT_DIR: /var/lib/eln-attachments
+      ELN_AUDIT_HMAC_KEY: ${ELN_AUDIT_HMAC_KEY:?Set ELN_AUDIT_HMAC_KEY in .env}
     volumes:
       - notebook-attachments:/var/lib/eln-attachments
     depends_on:
-      notebook-db:
-        condition: service_healthy
+      notebook-migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=2)"]
       interval: 5s
