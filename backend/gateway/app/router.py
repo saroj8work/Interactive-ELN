@@ -21,6 +21,7 @@ from eln_common.contracts import (
     EquipmentBookingRead,
     EquipmentCreate,
     EquipmentRead,
+    EntryTimestampRead,
     ExperimentCreate,
     ExperimentRead,
     ExperimentStatusUpdate,
@@ -43,11 +44,15 @@ from eln_common.contracts import (
     SearchHit,
     SampleCreate,
     SampleRead,
+    StorageLocationCreate,
+    StorageLocationRead,
     StockAdjustment,
     StockMovementRead,
     TaskCreate,
     TaskRead,
     TaskStatusUpdate,
+    WorkflowRuleCreate,
+    WorkflowRuleRead,
     ResourceStatusUpdate,
 )
 from services.identity.app.security import Principal, get_principal
@@ -95,6 +100,12 @@ PROJECT_IMPORT_RESULT = TypeAdapter(ProjectImportResult)
 SIGNATURE_LIST = TypeAdapter(list[RecordSignatureRead])
 SIGNATURE = TypeAdapter(RecordSignatureRead)
 AUDIT_VERIFICATION = TypeAdapter(AuditVerificationRead)
+STORAGE_LOCATIONS = TypeAdapter(list[StorageLocationRead])
+STORAGE_LOCATION = TypeAdapter(StorageLocationRead)
+WORKFLOW_RULES = TypeAdapter(list[WorkflowRuleRead])
+WORKFLOW_RULE = TypeAdapter(WorkflowRuleRead)
+ENTRY_TIMESTAMPS = TypeAdapter(list[EntryTimestampRead])
+ENTRY_TIMESTAMP = TypeAdapter(EntryTimestampRead)
 
 projects_router = APIRouter(prefix="/api/projects", tags=["projects"])
 notebook_router = APIRouter(tags=["notebook"])
@@ -1674,3 +1685,178 @@ async def _require_project_access(
     if write and access.role not in {"admin", "owner", "editor"}:
         raise HTTPException(status_code=403, detail="Project editor access required.")
     return access
+
+
+@notebook_router.get(
+    "/api/projects/{project_id}/workflow-rules",
+    response_model=list[WorkflowRuleRead],
+)
+async def list_project_workflow_rules(
+    project_id: int, client: ServiceClientDep, principal: PrincipalDep
+) -> list[WorkflowRuleRead]:
+    await _require_project_access(client, principal, project_id)
+    return await client.get(
+        "notebook",
+        f"/projects/{project_id}/workflow-rules",
+        WORKFLOW_RULES,
+        organization_id=principal.organization_id,
+    )
+
+
+@notebook_router.post(
+    "/api/projects/{project_id}/workflow-rules",
+    response_model=WorkflowRuleRead,
+    status_code=201,
+)
+async def create_project_workflow_rule(
+    project_id: int,
+    payload: WorkflowRuleCreate,
+    client: ServiceClientDep,
+    principal: PrincipalDep,
+) -> WorkflowRuleRead:
+    if payload.project_id != project_id:
+        raise HTTPException(status_code=422, detail="Workflow project does not match.")
+    await _require_project_access(client, principal, project_id, write=True)
+    return await client.post(
+        "notebook",
+        f"/projects/{project_id}/workflow-rules",
+        payload.model_dump(),
+        WORKFLOW_RULE,
+        organization_id=principal.organization_id,
+        user_id=principal.user_id,
+    )
+
+
+@inventory_router.get(
+    "/storage-locations", response_model=list[StorageLocationRead]
+)
+async def list_storage_locations(
+    client: ServiceClientDep, principal: PrincipalDep
+) -> list[StorageLocationRead]:
+    return await client.get(
+        "notebook",
+        "/storage-locations",
+        STORAGE_LOCATIONS,
+        organization_id=principal.organization_id,
+    )
+
+
+@inventory_router.post(
+    "/storage-locations",
+    response_model=StorageLocationRead,
+    status_code=201,
+)
+async def create_storage_location(
+    payload: StorageLocationCreate,
+    client: ServiceClientDep,
+    principal: PrincipalDep,
+) -> StorageLocationRead:
+    if principal.role != "admin":
+        raise HTTPException(status_code=403, detail="Organization admin role required.")
+    return await client.post(
+        "notebook",
+        "/storage-locations",
+        payload.model_dump(),
+        STORAGE_LOCATION,
+        organization_id=principal.organization_id,
+        user_id=principal.user_id,
+        organization_role=principal.role,
+    )
+
+
+@notebook_router.post(
+    "/api/entries/{entry_id}/timestamps",
+    response_model=EntryTimestampRead,
+    status_code=201,
+)
+async def create_entry_timestamp(
+    entry_id: int, client: ServiceClientDep, principal: PrincipalDep
+) -> EntryTimestampRead:
+    entry = await client.get(
+        "notebook",
+        f"/entries/{entry_id}",
+        ENTRY,
+        organization_id=principal.organization_id,
+    )
+    experiment = await client.get(
+        "notebook",
+        f"/experiments/{entry.experiment_id}",
+        EXPERIMENT,
+        organization_id=principal.organization_id,
+    )
+    await _require_project_access(
+        client, principal, experiment.project_id, write=True
+    )
+    return await client.post(
+        "notebook",
+        f"/entries/{entry_id}/timestamps",
+        {},
+        ENTRY_TIMESTAMP,
+        organization_id=principal.organization_id,
+        user_id=principal.user_id,
+    )
+
+
+@notebook_router.get(
+    "/api/entries/{entry_id}/timestamps",
+    response_model=list[EntryTimestampRead],
+)
+async def list_entry_timestamps(
+    entry_id: int, client: ServiceClientDep, principal: PrincipalDep
+) -> list[EntryTimestampRead]:
+    entry = await client.get(
+        "notebook",
+        f"/entries/{entry_id}",
+        ENTRY,
+        organization_id=principal.organization_id,
+    )
+    experiment = await client.get(
+        "notebook",
+        f"/experiments/{entry.experiment_id}",
+        EXPERIMENT,
+        organization_id=principal.organization_id,
+    )
+    await _require_project_access(client, principal, experiment.project_id)
+    return await client.get(
+        "notebook",
+        f"/entries/{entry_id}/timestamps",
+        ENTRY_TIMESTAMPS,
+        organization_id=principal.organization_id,
+    )
+
+
+@notebook_router.get("/api/entries/{entry_id}/timestamps/{timestamp_id}/proof")
+async def download_entry_timestamp_proof(
+    entry_id: int,
+    timestamp_id: int,
+    client: ServiceClientDep,
+    principal: PrincipalDep,
+) -> Response:
+    entry = await client.get(
+        "notebook",
+        f"/entries/{entry_id}",
+        ENTRY,
+        organization_id=principal.organization_id,
+    )
+    experiment = await client.get(
+        "notebook",
+        f"/experiments/{entry.experiment_id}",
+        EXPERIMENT,
+        organization_id=principal.organization_id,
+    )
+    await _require_project_access(client, principal, experiment.project_id)
+    content = await client.get_bytes(
+        "notebook",
+        f"/entries/{entry_id}/timestamps/{timestamp_id}/proof",
+        organization_id=principal.organization_id,
+    )
+    return Response(
+        content=content,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="entry-{entry_id}-timestamp-{timestamp_id}.zip"'
+            ),
+            "X-Content-Type-Options": "nosniff",
+        },
+    )

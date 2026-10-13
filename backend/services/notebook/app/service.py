@@ -3,10 +3,15 @@ import hmac
 import json
 import os
 import re
+import uuid
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import urlparse
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
+from rfc3161ng import RemoteTimestamper, TimestampingError, get_timestamp
 
 from eln_common.errors import EntityNotFoundError, InvalidInputError
 from eln_common.outbox import enqueue_event
@@ -16,6 +21,7 @@ from eln_common.errors import ServiceUnavailableError
 from .models import (
     EntryAttachment,
     EntryRevision,
+    EntryTimestamp,
     AuditEvent,
     EquipmentBooking,
     EquipmentResource,
@@ -27,6 +33,9 @@ from .models import (
     RecordSignature,
     Sample,
     StockMovement,
+    StorageLocation,
+    WorkflowExecution,
+    WorkflowRule,
 )
 from .attachment_storage import AttachmentStorage
 from .repository import NotebookRepository
@@ -68,7 +77,62 @@ class NotebookService:
             raise InvalidInputError("Experiment status is invalid.")
         if experiment.status == status:
             return experiment
+        previous_status = experiment.status
+        transition_id = str(uuid.uuid4())
         experiment.status = status
+        rules = list(
+            self._db.scalars(
+                select(WorkflowRule).where(
+                    WorkflowRule.organization_id == organization_id,
+                    WorkflowRule.project_id == experiment.project_id,
+                    WorkflowRule.enabled.is_(True),
+                    WorkflowRule.to_status == status,
+                    (WorkflowRule.from_status == previous_status)
+                    | (WorkflowRule.from_status.is_(None)),
+                )
+            )
+        )
+        for rule in rules:
+            now = datetime.now(timezone.utc)
+            task = LabTask(
+                organization_id=organization_id,
+                project_id=experiment.project_id,
+                experiment_id=experiment.id,
+                assigned_to_user_id=None,
+                created_by_user_id=user_id,
+                title=rule.task_title,
+                description=rule.task_description,
+                priority=rule.task_priority,
+                due_at=(
+                    now + timedelta(days=rule.due_days)
+                    if rule.due_days is not None
+                    else None
+                ),
+            )
+            self._db.add(task)
+            self._db.flush()
+            self._db.add(
+                WorkflowExecution(
+                    organization_id=organization_id,
+                    rule_id=rule.id,
+                    transition_id=transition_id,
+                    experiment_id=experiment.id,
+                    task_id=task.id,
+                )
+            )
+            enqueue_event(
+                self._db,
+                source_service="notebook",
+                action="workflow_task_created",
+                entity_type="lab_task",
+                entity_id=task.id,
+                organization_id=organization_id,
+                details={
+                    "rule_id": str(rule.id),
+                    "experiment_id": str(experiment.id),
+                    "transition_id": transition_id,
+                },
+            )
         enqueue_event(
             self._db,
             source_service="notebook",
@@ -79,7 +143,9 @@ class NotebookService:
             details={
                 "project_id": str(experiment.project_id),
                 "status": status,
+                "previous_status": previous_status,
                 "changed_by_user_id": str(user_id),
+                "transition_id": transition_id,
             },
         )
         self._db.commit()
@@ -149,6 +215,172 @@ class NotebookService:
         self._db.commit()
         self._db.refresh(task)
         return task
+
+    def list_workflow_rules(
+        self, organization_id: int, project_id: int
+    ) -> list[WorkflowRule]:
+        return list(
+            self._db.scalars(
+                select(WorkflowRule)
+                .where(
+                    WorkflowRule.organization_id == organization_id,
+                    WorkflowRule.project_id == project_id,
+                )
+                .order_by(WorkflowRule.created_at.desc())
+            )
+        )
+
+    def create_workflow_rule(
+        self, organization_id: int, user_id: int, values: dict
+    ) -> WorkflowRule:
+        if values.get("from_status") == values["to_status"]:
+            raise InvalidInputError("Workflow transition statuses must differ.")
+        project_id = values["project_id"]
+        rule = WorkflowRule(
+            organization_id=organization_id,
+            created_by_user_id=user_id,
+            **values,
+        )
+        self._db.add(rule)
+        self._db.commit()
+        self._db.refresh(rule)
+        return rule
+
+    def list_storage_locations(
+        self, organization_id: int, active_only: bool = True
+    ) -> list[StorageLocation]:
+        query = select(StorageLocation).where(
+            StorageLocation.organization_id == organization_id
+        )
+        if active_only:
+            query = query.where(StorageLocation.status == "active")
+        return list(self._db.scalars(query.order_by(StorageLocation.code)))
+
+    def create_storage_location(
+        self, organization_id: int, user_id: int, values: dict
+    ) -> StorageLocation:
+        code = values["code"].strip()
+        name = values["name"].strip()
+        if not code or not name:
+            raise InvalidInputError("Location code and name cannot be blank.")
+        parent_id = values.get("parent_id")
+        if parent_id is not None:
+            parent = self._db.scalar(
+                select(StorageLocation).where(
+                    StorageLocation.id == parent_id,
+                    StorageLocation.organization_id == organization_id,
+                    StorageLocation.status == "active",
+                )
+            )
+            if parent is None:
+                raise EntityNotFoundError("Parent storage location not found.")
+        location = StorageLocation(
+            organization_id=organization_id,
+            created_by_user_id=user_id,
+            **{**values, "code": code, "name": name},
+        )
+        self._db.add(location)
+        self._db.commit()
+        self._db.refresh(location)
+        return location
+
+    def create_entry_timestamp(
+        self, organization_id: int, entry_id: int, user_id: int
+    ) -> EntryTimestamp:
+        tsa_url = os.getenv("ELN_TSA_URL", "").strip()
+        certificate_path = os.getenv("ELN_TSA_CERTIFICATE_FILE", "").strip()
+        if not tsa_url or not certificate_path:
+            raise ServiceUnavailableError(
+                "RFC 3161 timestamping is not configured. Set ELN_TSA_URL and "
+                "ELN_TSA_CERTIFICATE_FILE to the trusted TSA endpoint and pinned "
+                "signer certificate."
+            )
+        parsed_url = urlparse(tsa_url)
+        if parsed_url.scheme != "https" or not parsed_url.netloc:
+            raise InvalidInputError("The configured TSA endpoint must use HTTPS.")
+        try:
+            certificate = Path(certificate_path).read_bytes()
+        except OSError as error:
+            raise ServiceUnavailableError(
+                "The configured TSA signer certificate could not be read."
+            ) from error
+        entry = self.get_entry(organization_id, entry_id)
+        snapshot = json.dumps(
+            {
+                "entry_id": entry.id,
+                "experiment_id": entry.experiment_id,
+                "organization_id": entry.organization_id,
+                "title": entry.title,
+                "content": entry.content,
+                "created_at": entry.created_at.isoformat(),
+                "updated_at": entry.updated_at.isoformat(),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        record_hash = hashlib.sha256(snapshot).hexdigest()
+        try:
+            timestamper = RemoteTimestamper(
+                tsa_url,
+                certificate=certificate,
+                hashname="sha256",
+                timeout=10,
+            )
+            token = timestamper.timestamp(data=snapshot)
+        except (TimestampingError, ValueError, OSError) as error:
+            raise ServiceUnavailableError(
+                "The TSA request failed or its response could not be verified "
+                "against the configured signer certificate."
+            ) from error
+        timestamp = get_timestamp(token)
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        else:
+            timestamp = timestamp.astimezone(timezone.utc)
+        record = EntryTimestamp(
+            organization_id=organization_id,
+            entry_id=entry.id,
+            requested_by_user_id=user_id,
+            tsa_url=tsa_url,
+            record_sha256=record_hash,
+            snapshot_json=snapshot.decode("utf-8"),
+            token_der=token,
+            tsa_time=timestamp,
+        )
+        self._db.add(record)
+        self._db.commit()
+        self._db.refresh(record)
+        return record
+
+    def list_entry_timestamps(
+        self, organization_id: int, entry_id: int
+    ) -> list[EntryTimestamp]:
+        self.get_entry(organization_id, entry_id)
+        return list(
+            self._db.scalars(
+                select(EntryTimestamp)
+                .where(
+                    EntryTimestamp.organization_id == organization_id,
+                    EntryTimestamp.entry_id == entry_id,
+                )
+                .order_by(EntryTimestamp.tsa_time.desc())
+            )
+        )
+
+    def get_entry_timestamp(
+        self, organization_id: int, entry_id: int, timestamp_id: int
+    ) -> EntryTimestamp:
+        timestamp = self._db.scalar(
+            select(EntryTimestamp).where(
+                EntryTimestamp.organization_id == organization_id,
+                EntryTimestamp.entry_id == entry_id,
+                EntryTimestamp.id == timestamp_id,
+            )
+        )
+        if timestamp is None:
+            raise EntityNotFoundError("Entry timestamp proof not found.")
+        return timestamp
 
     def list_tasks(self, organization_id: int, project_id: int) -> list[LabTask]:
         return self._repository.list_tasks(organization_id, project_id)
@@ -667,6 +899,22 @@ class NotebookService:
     def list_inventory(self, organization_id: int) -> list[InventoryItem]:
         return self._repository.list_inventory(organization_id)
 
+    def _location_label(
+        self, organization_id: int, location_id: int | None, legacy_text: str
+    ) -> str:
+        if location_id is None:
+            return legacy_text
+        location = self._db.scalar(
+            select(StorageLocation).where(
+                StorageLocation.id == location_id,
+                StorageLocation.organization_id == organization_id,
+                StorageLocation.status == "active",
+            )
+        )
+        if location is None:
+            raise EntityNotFoundError("Active storage location not found.")
+        return location.name
+
     def create_inventory_item(
         self, organization_id: int, user_id: int, values: dict
     ) -> InventoryItem:
@@ -677,6 +925,9 @@ class NotebookService:
             raise InvalidInputError(
                 "Inventory item name, category, and unit cannot be blank."
             )
+        values["location"] = self._location_label(
+            organization_id, values.get("location_id"), values.get("location", "")
+        )
         item = self._repository.add_inventory_item(
             InventoryItem(
                 organization_id=organization_id,
@@ -785,6 +1036,11 @@ class NotebookService:
             organization_id, parent_id
         ) is None:
             raise EntityNotFoundError("Parent sample not found.")
+        values["storage_location"] = self._location_label(
+            organization_id,
+            values.get("storage_location_id"),
+            values.get("storage_location", ""),
+        )
         sample = self._repository.add_sample(
             Sample(
                 organization_id=organization_id,
@@ -1041,6 +1297,11 @@ class NotebookService:
         name = values["name"].strip()
         if not name:
             raise InvalidInputError("Equipment name cannot be blank.")
+        values["location"] = self._location_label(
+            organization_id,
+            values.get("storage_location_id"),
+            values.get("location", ""),
+        )
         equipment = self._repository.add_equipment(
             EquipmentResource(
                 organization_id=organization_id,

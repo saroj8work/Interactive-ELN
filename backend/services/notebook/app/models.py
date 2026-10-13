@@ -127,6 +127,7 @@ class InventoryItem(Base):
     low_stock_threshold: Mapped[Decimal] = mapped_column(
         Numeric(14, 3), default=Decimal("0")
     )
+    location_id: Mapped[int | None] = mapped_column(ForeignKey("storage_locations.id"), index=True)
     location: Mapped[str] = mapped_column(String(200), default="")
     notes: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(24), default="active", index=True)
@@ -159,6 +160,9 @@ class Sample(Base):
     sample_type: Mapped[str] = mapped_column(String(80))
     external_id: Mapped[str] = mapped_column(String(120), default="", index=True)
     parent_sample_id: Mapped[int | None] = mapped_column(ForeignKey("samples.id"))
+    storage_location_id: Mapped[int | None] = mapped_column(
+        ForeignKey("storage_locations.id"), index=True
+    )
     storage_location: Mapped[str] = mapped_column(String(200), default="")
     description: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(24), default="active", index=True)
@@ -205,6 +209,9 @@ class EquipmentResource(Base):
     organization_id: Mapped[int] = mapped_column(index=True)
     name: Mapped[str] = mapped_column(String(160), index=True)
     description: Mapped[str] = mapped_column(Text, default="")
+    storage_location_id: Mapped[int | None] = mapped_column(
+        ForeignKey("storage_locations.id"), index=True
+    )
     location: Mapped[str] = mapped_column(String(200), default="")
     category: Mapped[str] = mapped_column(String(64), default="equipment", index=True)
     status: Mapped[str] = mapped_column(String(24), default="active", index=True)
@@ -247,3 +254,67 @@ class LabTask(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
     )
+
+
+class StorageLocation(Base):
+    __tablename__ = "storage_locations"
+    __table_args__ = (UniqueConstraint("organization_id", "code"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(index=True)
+    parent_id: Mapped[int | None] = mapped_column(ForeignKey("storage_locations.id"), index=True)
+    code: Mapped[str] = mapped_column(String(80))
+    name: Mapped[str] = mapped_column(String(160))
+    location_type: Mapped[str] = mapped_column(String(32), default="room")
+    description: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(24), default="active", index=True)
+    created_by_user_id: Mapped[int] = mapped_column()
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class WorkflowRule(Base):
+    __tablename__ = "workflow_rules"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(index=True)
+    project_id: Mapped[int] = mapped_column(index=True)
+    name: Mapped[str] = mapped_column(String(160))
+    from_status: Mapped[str | None] = mapped_column(String(32))
+    to_status: Mapped[str] = mapped_column(String(32))
+    task_title: Mapped[str] = mapped_column(String(200))
+    task_description: Mapped[str] = mapped_column(Text, default="")
+    task_priority: Mapped[str] = mapped_column(String(16), default="normal")
+    due_days: Mapped[int | None] = mapped_column()
+    enabled: Mapped[bool] = mapped_column(default=True)
+    created_by_user_id: Mapped[int] = mapped_column()
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class WorkflowExecution(Base):
+    __tablename__ = "workflow_executions"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "rule_id", "transition_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(index=True)
+    rule_id: Mapped[int] = mapped_column(ForeignKey("workflow_rules.id"), index=True)
+    transition_id: Mapped[str] = mapped_column(String(36))
+    experiment_id: Mapped[int] = mapped_column(index=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("lab_tasks.id"), index=True)
+    executed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class EntryTimestamp(Base):
+    __tablename__ = "entry_timestamps"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(index=True)
+    entry_id: Mapped[int] = mapped_column(ForeignKey("notebook_entries.id"), index=True)
+    requested_by_user_id: Mapped[int] = mapped_column()
+    tsa_url: Mapped[str] = mapped_column(String(500))
+    record_sha256: Mapped[str] = mapped_column(String(64))
+    snapshot_json: Mapped[str] = mapped_column(Text)
+    token_der: Mapped[bytes] = mapped_column()
+    tsa_time: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

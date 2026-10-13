@@ -174,6 +174,7 @@ class InventoryItemCreate(BaseModel):
         default=Decimal("0"), ge=0, max_digits=14, decimal_places=3
     )
     location: str = Field(default="", max_length=200)
+    location_id: int | None = Field(default=None, gt=0)
     notes: str = Field(default="", max_length=5000)
 
 
@@ -185,6 +186,60 @@ class InventoryItemRead(InventoryItemCreate):
     created_at: datetime
     updated_at: datetime
     status: Literal["active", "archived"]
+
+
+class StorageLocationCreate(BaseModel):
+    code: str = Field(min_length=1, max_length=80)
+    name: str = Field(min_length=1, max_length=160)
+    parent_id: int | None = Field(default=None, gt=0)
+    location_type: Literal[
+        "building", "room", "freezer", "refrigerator", "cabinet", "shelf", "box", "other"
+    ] = "room"
+    description: str = Field(default="", max_length=2000)
+
+
+class StorageLocationRead(StorageLocationCreate):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    organization_id: int
+    status: Literal["active", "archived"]
+    created_by_user_id: int
+    created_at: datetime
+
+
+class WorkflowRuleCreate(BaseModel):
+    project_id: int = Field(gt=0)
+    name: str = Field(min_length=1, max_length=160)
+    from_status: Literal["in_progress", "completed", "archived"] | None = None
+    to_status: Literal["in_progress", "completed", "archived"]
+    task_title: str = Field(min_length=1, max_length=200)
+    task_description: str = Field(default="", max_length=5000)
+    task_priority: Literal["low", "normal", "high", "urgent"] = "normal"
+    due_days: int | None = Field(default=None, ge=0, le=3650)
+
+
+class WorkflowRuleRead(WorkflowRuleCreate):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    organization_id: int
+    enabled: bool
+    created_by_user_id: int
+    created_at: datetime
+
+
+class EntryTimestampRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    organization_id: int
+    entry_id: int
+    requested_by_user_id: int
+    tsa_url: str
+    record_sha256: str
+    tsa_time: datetime
+    created_at: datetime
 
 
 class StockAdjustment(BaseModel):
@@ -214,6 +269,7 @@ class SampleCreate(BaseModel):
     project_id: int | None = Field(default=None, gt=0)
     parent_sample_id: int | None = Field(default=None, gt=0)
     storage_location: str = Field(default="", max_length=200)
+    storage_location_id: int | None = Field(default=None, gt=0)
     description: str = Field(default="", max_length=5000)
 
 
@@ -293,6 +349,7 @@ class EquipmentCreate(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     description: str = Field(default="", max_length=5000)
     location: str = Field(default="", max_length=200)
+    storage_location_id: int | None = Field(default=None, gt=0)
     category: str = Field(default="equipment", min_length=1, max_length=64)
 
 

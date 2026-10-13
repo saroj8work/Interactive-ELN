@@ -1,4 +1,9 @@
 from typing import Annotated
+from io import BytesIO
+from zipfile import ZIP_DEFLATED, ZipFile
+import json
+import os
+from pathlib import Path
 
 from fastapi import (
     APIRouter,
@@ -24,6 +29,7 @@ from eln_common.contracts import (
     EquipmentBookingRead,
     EquipmentCreate,
     EquipmentRead,
+    EntryTimestampRead,
     ExperimentCreate,
     ExperimentRead,
     ExperimentStatusUpdate,
@@ -45,6 +51,10 @@ from eln_common.contracts import (
     TaskCreate,
     TaskRead,
     TaskStatusUpdate,
+    StorageLocationCreate,
+    StorageLocationRead,
+    WorkflowRuleCreate,
+    WorkflowRuleRead,
 )
 from eln_common.database import Database
 from eln_common.errors import AuthenticationError, InvalidInputError
@@ -105,6 +115,145 @@ def create_router(database: Database) -> APIRouter:
         organization_id: Annotated[int, Header(alias="X-Organization-ID")],
     ) -> list[TaskRead]:
         return service.list_tasks(organization_id, project_id)
+
+    @router.get(
+        "/projects/{project_id}/workflow-rules",
+        response_model=list[WorkflowRuleRead],
+    )
+    def list_workflow_rules(
+        project_id: int,
+        service: Annotated[NotebookService, Depends(get_service)],
+        organization_id: Annotated[int, Header(alias="X-Organization-ID")],
+    ) -> list[WorkflowRuleRead]:
+        return service.list_workflow_rules(organization_id, project_id)
+
+    @router.post(
+        "/projects/{project_id}/workflow-rules",
+        response_model=WorkflowRuleRead,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_workflow_rule(
+        project_id: int,
+        payload: WorkflowRuleCreate,
+        service: Annotated[NotebookService, Depends(get_service)],
+        actor: Annotated[tuple[int, int, bool], Depends(actor_headers)],
+    ) -> WorkflowRuleRead:
+        organization_id, user_id, _ = actor
+        if payload.project_id != project_id:
+            raise InvalidInputError("Workflow project does not match the request.")
+        return service.create_workflow_rule(
+            organization_id, user_id, payload.model_dump()
+        )
+
+    @router.get(
+        "/storage-locations", response_model=list[StorageLocationRead]
+    )
+    def list_storage_locations(
+        service: Annotated[NotebookService, Depends(get_service)],
+        organization_id: Annotated[int, Header(alias="X-Organization-ID")],
+    ) -> list[StorageLocationRead]:
+        return service.list_storage_locations(organization_id)
+
+    @router.post(
+        "/storage-locations",
+        response_model=StorageLocationRead,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_storage_location(
+        payload: StorageLocationCreate,
+        service: Annotated[NotebookService, Depends(get_service)],
+        actor: Annotated[tuple[int, int, bool], Depends(actor_headers)],
+    ) -> StorageLocationRead:
+        organization_id, user_id, is_admin = actor
+        if not is_admin:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Organization admin role required.",
+            )
+        return service.create_storage_location(
+            organization_id, user_id, payload.model_dump()
+        )
+
+    @router.post(
+        "/entries/{entry_id}/timestamps",
+        response_model=EntryTimestampRead,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_entry_timestamp(
+        entry_id: int,
+        service: Annotated[NotebookService, Depends(get_service)],
+        actor: Annotated[tuple[int, int, bool], Depends(actor_headers)],
+    ) -> EntryTimestampRead:
+        organization_id, user_id, _ = actor
+        return service.create_entry_timestamp(organization_id, entry_id, user_id)
+
+    @router.get(
+        "/entries/{entry_id}/timestamps",
+        response_model=list[EntryTimestampRead],
+    )
+    def list_entry_timestamps(
+        entry_id: int,
+        service: Annotated[NotebookService, Depends(get_service)],
+        organization_id: Annotated[int, Header(alias="X-Organization-ID")],
+    ) -> list[EntryTimestampRead]:
+        return service.list_entry_timestamps(organization_id, entry_id)
+
+    @router.get(
+        "/entries/{entry_id}/timestamps/{timestamp_id}/proof"
+    )
+    def download_entry_timestamp_proof(
+        entry_id: int,
+        timestamp_id: int,
+        service: Annotated[NotebookService, Depends(get_service)],
+        organization_id: Annotated[int, Header(alias="X-Organization-ID")],
+    ) -> Response:
+        timestamp = service.get_entry_timestamp(
+            organization_id, entry_id, timestamp_id
+        )
+        certificate_path = os.getenv("ELN_TSA_CERTIFICATE_FILE", "").strip()
+        if not certificate_path:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="TSA verification certificate is not configured.",
+            )
+        try:
+            certificate = Path(certificate_path).read_bytes()
+        except OSError as error:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="TSA verification certificate could not be read.",
+            ) from error
+        proof = BytesIO()
+        with ZipFile(proof, "w", ZIP_DEFLATED) as archive:
+            archive.writestr("snapshot.json", timestamp.snapshot_json)
+            archive.writestr("timestamp.tsr", timestamp.token_der)
+            archive.writestr("tsa-signer.pem", certificate)
+            archive.writestr(
+                "proof.json",
+                json.dumps(
+                    {
+                        "format": "RFC3161",
+                        "tsa_url": timestamp.tsa_url,
+                        "record_sha256": timestamp.record_sha256,
+                        "timestamp": timestamp.tsa_time.isoformat(),
+                        "verification": (
+                            "Verify timestamp.tsr against snapshot.json with "
+                            "the included explicitly pinned tsa-signer.pem."
+                        ),
+                    },
+                    indent=2,
+                ),
+            )
+        return Response(
+            content=proof.getvalue(),
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="entry-{entry_id}-timestamp-{timestamp_id}.zip"'
+                ),
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
     @router.post(
         "/projects/{project_id}/tasks",
