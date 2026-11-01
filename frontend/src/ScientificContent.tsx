@@ -2,9 +2,10 @@ import React, { useMemo } from "react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 
-interface ScientificContentProps {
+export interface ScientificContentProps {
   content: string;
   className?: string;
+  onNavigate?: (kind: "inventory" | "sample" | "experiment", id: number) => void;
 }
 
 type Token =
@@ -45,9 +46,67 @@ function tokenizeScientificContent(text: string): Token[] {
   return tokens;
 }
 
+// Helper to render text with inline @inventory, #sample, !experiment links
+function renderTextWithMentions(
+  line: string,
+  onNavigate?: (kind: "inventory" | "sample" | "experiment", id: number) => void
+) {
+  // Regex to match [@Name](#inv:123), [#Name](#smp:123), [!Name](#exp:123)
+  const mentionRegex = /\[([@#!])([^\]]+)\]\(#(inv|smp|exp):(\d+)\)/g;
+  const parts: React.ReactNode[] = [];
+  let lastIdx = 0;
+  let m: RegExpExecArray | null;
+
+  while ((m = mentionRegex.exec(line)) !== null) {
+    if (m.index > lastIdx) {
+      parts.push(line.slice(lastIdx, m.index));
+    }
+    const prefix = m[1];
+    const label = m[2];
+    const targetType = m[3];
+    const targetId = parseInt(m[4], 10);
+
+    let kind: "inventory" | "sample" | "experiment" = "inventory";
+    let icon = "🧪";
+    let pillClass = "mention-pill-inventory";
+
+    if (prefix === "#" || targetType === "smp") {
+      kind = "sample";
+      icon = "🧬";
+      pillClass = "mention-pill-sample";
+    } else if (prefix === "!" || targetType === "exp") {
+      kind = "experiment";
+      icon = "📓";
+      pillClass = "mention-pill-exp";
+    }
+
+    parts.push(
+      <span
+        key={`mention-${m.index}`}
+        className={`mention-pill ${pillClass}`}
+        title={`Click to open ${kind} #${targetId}`}
+        onClick={() => onNavigate?.(kind, targetId)}
+        role="button"
+        tabIndex={0}
+      >
+        <span>{icon}</span>
+        <span>{label}</span>
+      </span>
+    );
+    lastIdx = m.index + m[0].length;
+  }
+
+  if (lastIdx < line.length) {
+    parts.push(line.slice(lastIdx));
+  }
+
+  return parts;
+}
+
 export function ScientificContent({
   content,
   className = "scientific-content",
+  onNavigate,
 }: ScientificContentProps) {
   const rendered = useMemo(() => {
     if (!content.trim()) {
@@ -101,7 +160,7 @@ export function ScientificContent({
         }
       }
 
-      // Plain text: preserve whitespace and line breaks
+      // Plain text: preserve whitespace, line breaks, and parse @/#/! mentions
       const paragraphs = token.value.split("\n\n");
       return (
         <React.Fragment key={index}>
@@ -111,7 +170,7 @@ export function ScientificContent({
               <span key={pIdx} className="scientific-text">
                 {lines.map((line, lIdx) => (
                   <React.Fragment key={lIdx}>
-                    {line}
+                    {renderTextWithMentions(line, onNavigate)}
                     {lIdx < lines.length - 1 && <br />}
                   </React.Fragment>
                 ))}
@@ -122,8 +181,7 @@ export function ScientificContent({
         </React.Fragment>
       );
     });
-  }, [content]);
+  }, [content, onNavigate]);
 
   return <div className={className}>{rendered}</div>;
 }
-

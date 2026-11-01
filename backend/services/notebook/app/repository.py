@@ -460,14 +460,15 @@ class NotebookRepository:
         self._db.flush()
         return event
 
-    def list_audit_events(self, organization_id: int) -> list[AuditEvent]:
-        return list(
-            self._db.scalars(
-                select(AuditEvent)
-                .where(AuditEvent.organization_id == organization_id)
-                .order_by(AuditEvent.id)
-            )
-        )
+    def list_audit_events(
+        self, organization_id: int, entity_type: str | None = None, entity_id: int | None = None
+    ) -> list[AuditEvent]:
+        stmt = select(AuditEvent).where(AuditEvent.organization_id == organization_id)
+        if entity_type:
+            stmt = stmt.where(AuditEvent.entity_type == entity_type)
+        if entity_id:
+            stmt = stmt.where(AuditEvent.entity_id == entity_id)
+        return list(self._db.scalars(stmt.order_by(AuditEvent.id)))
 
     def list_signatures(
         self, organization_id: int, entity_type: str, entity_id: int

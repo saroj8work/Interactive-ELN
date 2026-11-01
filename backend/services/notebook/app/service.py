@@ -1176,8 +1176,32 @@ class NotebookService:
                     "project_id": str(task.project_id),
                     "status": status,
                     "changed_by_user_id": str(user_id),
+                    "experiment_id": str(task.experiment_id or ""),
                 },
             )
+            if status == "completed" and task.experiment_id:
+                experiment = self._repository.get_experiment(organization_id, task.experiment_id)
+                if experiment and experiment.status == "in_progress":
+                    exp_tasks = [
+                        t
+                        for t in self._repository.list_tasks(organization_id, task.project_id)
+                        if t.experiment_id == task.experiment_id
+                    ]
+                    if exp_tasks and all(t.status in {"completed", "cancelled"} for t in exp_tasks):
+                        enqueue_event(
+                            self._db,
+                            source_service="notebook",
+                            action="experiment_all_tasks_completed",
+                            entity_type="experiment",
+                            entity_id=experiment.id,
+                            organization_id=organization_id,
+                            details={
+                                "project_id": str(task.project_id),
+                                "experiment_id": str(experiment.id),
+                                "experiment_name": experiment.name,
+                                "created_by_user_id": str(getattr(experiment, "created_by_user_id", user_id)),
+                            },
+                        )
             self._db.commit()
             self._db.refresh(task)
         return task
@@ -1394,6 +1418,13 @@ class NotebookService:
     ) -> list[RecordSignature]:
         self.get_entry(organization_id, entry_id)
         return self._repository.list_signatures(organization_id, "entry", entry_id)
+
+    def list_audit_events(
+        self, organization_id: int, entity_type: str | None = None, entity_id: int | None = None
+    ) -> list[AuditEvent]:
+        return self._repository.list_audit_events(
+            organization_id, entity_type=entity_type, entity_id=entity_id
+        )
 
     def verify_audit_chain(self, organization_id: int) -> dict[str, int | bool]:
         key = os.getenv("ELN_AUDIT_HMAC_KEY", "")

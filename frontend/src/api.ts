@@ -136,6 +136,16 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ status }),
     }),
+  importElabftwSchema: (payload: Record<string, unknown>) =>
+    request<{
+      imported: string[];
+      skipped: string[];
+      imported_count: number;
+      skipped_count: number;
+    }>("/api/inventory/custom-fields/import-elabftw", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   adjustStock: (itemId: number, quantityDelta: number, reason: string) =>
     request(`/api/inventory/${itemId}/adjustments`, {
       method: "POST",
@@ -362,11 +372,34 @@ export const api = {
     entryId: number,
     meaning: RecordSignature["meaning"],
     comment: string,
+    password?: string,
   ) =>
     request<RecordSignature>(`/api/entries/${entryId}/signatures`, {
       method: "POST",
-      body: JSON.stringify({ entity_type: "entry", entity_id: entryId, meaning, comment }),
+      body: JSON.stringify({
+        entity_type: "entry",
+        entity_id: entryId,
+        meaning,
+        comment,
+        password: password || undefined,
+      }),
     }),
+  exportAuditTrail: async (experimentId: number, format: "json" | "csv" = "json") => {
+    const token = localStorage.getItem("eln_access_token") || "";
+    const headers: Record<string, string> = {};
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    const res = await fetch(`/api/experiments/${experimentId}/audit-trail/export?format=${format}`, { headers });
+    if (!res.ok) throw new Error("Failed to export audit trail");
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `audit_trail_exp_${experimentId}.${format}`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  },
   verifyAuditChain: () => request<AuditVerification>("/api/audit/verify"),
   equipment: () => request<EquipmentResource[]>("/api/equipment"),
   createEquipment: (payload: {
@@ -386,6 +419,23 @@ export const api = {
     payload: { starts_at: string; ends_at: string; purpose: string; project_id: number | null },
   ) =>
     request<EquipmentBooking>(`/api/equipment/${equipmentId}/bookings`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  createRecurringBooking: (
+    equipmentId: number,
+    payload: {
+      starts_at: string;
+      ends_at: string;
+      purpose: string;
+      project_id: number | null;
+      recurrence_unit: "day" | "week" | "month";
+      recurrence_interval: number;
+      recurrence_count?: number;
+      recurrence_until?: string;
+    },
+  ) =>
+    request<EquipmentBooking[]>(`/api/equipment/${equipmentId}/bookings/recurring`, {
       method: "POST",
       body: JSON.stringify(payload),
     }),

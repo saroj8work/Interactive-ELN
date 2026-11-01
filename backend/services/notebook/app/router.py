@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from eln_common.contracts import (
     AuditVerificationRead,
+    AuditEventRead,
     AttachmentRead,
     EntryCreate,
     EntryRead,
@@ -540,6 +541,17 @@ print("PASS: snapshot digest and RFC 3161 token verified against the included si
         organization_id: Annotated[int, Header(alias="X-Organization-ID")],
     ) -> list[RecordSignatureRead]:
         return service.list_signatures(organization_id, entry_id)
+
+    @router.get("/audit/events", response_model=list[AuditEventRead])
+    def list_audit_events(
+        service: Annotated[NotebookService, Depends(get_service)],
+        organization_id: Annotated[int, Header(alias="X-Organization-ID")],
+        entity_type: str | None = None,
+        entity_id: int | None = None,
+    ) -> list[AuditEventRead]:
+        return service.list_audit_events(
+            organization_id, entity_type=entity_type, entity_id=entity_id
+        )
 
     @router.get("/audit/verify", response_model=AuditVerificationRead)
     def verify_audit_chain(

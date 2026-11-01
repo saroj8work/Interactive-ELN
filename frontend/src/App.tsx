@@ -29,7 +29,15 @@ import type {
   WebhookEndpoint,
 } from "./types";
 import { ScientificContent } from "./ScientificContent";
-import { MoleculeEditor } from "./MoleculeEditor";
+import { MoleculeEditor, type Structure } from "./MoleculeEditor";
+import { StoichiometryTable } from "./StoichiometryTable";
+import { StorageBoxGrid } from "./StorageBoxGrid";
+import { LabLabelGenerator, type LabelData } from "./LabLabelGenerator";
+import { ProtocolStepTimer } from "./ProtocolStepTimer";
+import { WorkflowDagCanvas } from "./WorkflowDagCanvas";
+import { BarcodeScannerModal } from "./BarcodeScannerModal";
+import { FormalReportView } from "./FormalReportView";
+import { ChemicalSearchModal } from "./ChemicalSearchModal";
 import { formatLocaleDate, formatLocaleDateOnly, getSavedLocale, saveLocale, translate, type Locale } from "./i18n";
 
 function formatDate(value: string): string {
@@ -179,6 +187,102 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
   const [locationsOpen, setLocationsOpen] = useState(false);
   const [editorMode, setEditorMode] = useState<"edit" | "preview">("edit");
   const [auditNotice, setAuditNotice] = useState("");
+  const [activeMoleculeStructure, setActiveMoleculeStructure] = useState<Structure | null>(null);
+  const [barcodeScannerOpen, setBarcodeScannerOpen] = useState(false);
+  const [formalReportOpen, setFormalReportOpen] = useState(false);
+  const [chemSearchOpen, setChemSearchOpen] = useState(false);
+  const [inventoryItems, setInventoryItems] = useState<InventoryItem[]>([]);
+  const [samples, setSamples] = useState<SampleRecord[]>([]);
+
+  const loadInventoryAndSamples = useCallback(async () => {
+    try {
+      const [inv, smp] = await Promise.all([api.inventory(), api.samples()]);
+      setInventoryItems(inv);
+      setSamples(smp);
+    } catch {
+      // Non-fatal
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadInventoryAndSamples();
+  }, [loadInventoryAndSamples]);
+
+  const handleDeductStoichiometryStock = useCallback(
+    async (deductions: { itemId: number; itemName: string; amount: number; unit: string }[]) => {
+      for (const d of deductions) {
+        await api.adjustStock(
+          d.itemId,
+          -d.amount,
+          `Consumed in experiment #${selectedExperimentRef.current ?? ""}`
+        );
+      }
+      await loadInventoryAndSamples();
+      setNotice(`Deducted ${deductions.length} reagents from laboratory inventory.`);
+    },
+    [loadInventoryAndSamples]
+  );
+
+  const handleBarcodeDetected = useCallback(
+    (code: string) => {
+      const trimmed = code.trim();
+      const smpMatch = trimmed.match(/^(?:smp-|sample:?)(\d+)/i);
+      if (smpMatch) {
+        const sampleId = parseInt(smpMatch[1], 10);
+        setNotice(`Scanned Sample #${sampleId}. Opening lab inventory & samples...`);
+        setInventoryOpen(true);
+        return;
+      }
+      const invMatch = trimmed.match(/^(?:inv-|reagent:?)(\d+)/i);
+      if (invMatch) {
+        const itemId = parseInt(invMatch[1], 10);
+        setNotice(`Scanned Inventory Reagent #${itemId}. Opening inventory...`);
+        setInventoryOpen(true);
+        return;
+      }
+      const expMatch = trimmed.match(/^(?:exp-|experiment:?)(\d+)/i);
+      if (expMatch) {
+        const expId = parseInt(expMatch[1], 10);
+        if (experiments.some((e) => e.id === expId)) {
+          setSelectedExperiment(expId);
+          setNotice(`Navigated to Experiment #${expId}`);
+          return;
+        }
+      }
+      setNotice(`Scanned label: ${trimmed}. Searching records...`);
+      void api.search(trimmed).then((res) => {
+        setSearchResults(res);
+        setSearchOpen(true);
+      });
+    },
+    [experiments]
+  );
+
+  const handleChemSearchResult = useCallback(
+    (type: "experiment" | "entry" | "inventory", id: number) => {
+      if (type === "inventory") {
+        setInventoryOpen(true);
+        setNotice(`Opened Inventory for Reagent #${id}`);
+      } else {
+        setSelectedExperiment(id);
+        setNotice(`Navigated to Experiment #${id}`);
+      }
+    },
+    []
+  );
+
+  const handleMentionNavigate = useCallback(
+    (kind: "inventory" | "sample" | "experiment", id: number) => {
+      if (kind === "inventory" || kind === "sample") {
+        setInventoryOpen(true);
+        setNotice(`Navigated to ${kind} #${id}`);
+      } else if (kind === "experiment") {
+        setSelectedExperiment(id);
+        setNotice(`Navigated to experiment #${id}`);
+      }
+    },
+    []
+  );
 
   useEffect(() => {
     document.documentElement.lang = locale === "hi" ? "hi-IN" : "en";
@@ -520,10 +624,11 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
   async function handleEntrySignature(
     meaning: RecordSignature["meaning"],
     comment: string,
+    password?: string,
   ): Promise<boolean> {
     if (selectedEntry === null) return false;
     try {
-      const signature = await api.signEntry(selectedEntry, meaning, comment);
+      const signature = await api.signEntry(selectedEntry, meaning, comment, password);
       setEntrySignatures((current) => [...current, signature]);
       setNotice(`Record signed as ${meaning}.`);
       setError("");
@@ -659,6 +764,37 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
     }
   }
 
+  async function handleSaveStoichiometryAttachment(file: File) {
+    if (selectedEntry === null) return;
+    try {
+      await api.uploadAttachment(selectedEntry, file);
+      setAttachments(await api.attachments(selectedEntry));
+      setNotice(t("Stoichiometry calculation attached to this notebook entry."));
+      setError("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("Unable to attach the stoichiometry calculation."));
+      throw err;
+    }
+  }
+
+  function handleInsertStoichiometryMarkdown(markdown: string) {
+    const textarea = document.getElementById("entry-content") as HTMLTextAreaElement | null;
+    if (textarea) {
+      const cur = textarea.value;
+      const next = cur ? `${cur}\n\n${markdown}` : markdown;
+      textarea.value = next;
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    setEntries((items) =>
+      items.map((entry) =>
+        entry.id === selectedEntry
+          ? { ...entry, content: entry.content ? `${entry.content}\n\n${markdown}` : markdown }
+          : entry
+      )
+    );
+    setNotice(t("Stoichiometry table inserted into notebook entry."));
+  }
+
   async function handleExportEntry() {
     if (selectedEntry === null) return;
     try {
@@ -677,7 +813,7 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
         setError("");
       } catch (err) {
         setError(err instanceof Error ? err.message : "Unable to load entry history.");
-        return;
+  
       }
     }
     setHistoryOpen((open) => !open);
@@ -739,7 +875,9 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-mark">i</div>
+          <div className="brand-mark">
+            <img src="/app-icon.jpg" alt="Interactive ELN" />
+          </div>
           <div>
             <strong>Interactive ELN</strong>
             <span>{t("Research workspace")}</span>
@@ -811,29 +949,47 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
             </label>
             <form className="global-search" onSubmit={handleSearch}>
               <input name="query" placeholder={`${t("Search records")}…`} aria-label={t("Search records")} maxLength={100} />
-              <button className="button button-outline" type="submit">{t("Search")}</button>
+              <button className="button button-outline" type="submit">🔍 {t("Search")}</button>
             </form>
+            <button
+              className="button button-outline"
+              type="button"
+              onClick={() => setBarcodeScannerOpen(true)}
+              style={{ display: "inline-flex", alignItems: "center", gap: 6, borderColor: "#d8c8f7", color: "#3F1899" }}
+              title="Scan 2D/1D barcodes or QR codes from bench camera"
+            >
+              📷 {t("Scan Label")}
+            </button>
+            <button
+              className="button button-outline"
+              type="button"
+              onClick={() => setChemSearchOpen(true)}
+              style={{ display: "inline-flex", alignItems: "center", gap: 6, borderColor: "#d8c8f7", color: "#3F1899" }}
+              title="Search molecules by SMILES, formula, or functional group"
+            >
+              ⚛️ {t("Structure Search")}
+            </button>
             <span className="environment-badge">LOCAL WORKSPACE</span>
             <button className="button button-outline" onClick={() => setInventoryOpen((open) => !open)}>
-              {t("Lab inventory")}
+              🧪 {t("Lab inventory")}
             </button>
             <button className="button button-outline" onClick={() => setTemplatesOpen((open) => !open)}>
-              {t("Templates")}
+              📄 {t("Templates")}
             </button>
             <button className="button button-outline" onClick={() => setEquipmentOpen((open) => !open)}>
-              {t("Equipment")}
+              🔬 {t("Equipment")}
             </button>
             <button className="button button-outline" onClick={() => setLocationsOpen((open) => !open)}>
-              {t("Storage locations")}
+              🧊 {t("Storage locations")}
             </button>
             {user.role === "admin" && (
               <button className="button button-outline" onClick={() => setIntegrationsOpen((open) => !open)}>
-                {t("Integrations")}
+                🔌 {t("Integrations")}
               </button>
             )}
             {user.role === "admin" && (
               <button className="button button-outline" onClick={() => setAdminOpen((open) => !open)}>
-                {t("Organization admin")}
+                ⚙️ {t("Organization admin")}
               </button>
             )}
             {selectedProjectData &&
@@ -887,6 +1043,33 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
             <button aria-label="Dismiss notice" onClick={() => setNotice("")}>×</button>
           </div>
         )}
+        {/* Parity Modals: Barcode Scanner, Formal Report, Chemical Search */}
+        <BarcodeScannerModal
+          isOpen={barcodeScannerOpen}
+          onClose={() => setBarcodeScannerOpen(false)}
+          onDetected={handleBarcodeDetected}
+        />
+
+        {selectedExperimentData && (
+          <FormalReportView
+            isOpen={formalReportOpen}
+            onClose={() => setFormalReportOpen(false)}
+            experiment={selectedExperimentData}
+            entries={entries}
+            project={selectedProjectData}
+            currentUser={user}
+            auditTrail={activity}
+          />
+        )}
+
+        <ChemicalSearchModal
+          isOpen={chemSearchOpen}
+          onClose={() => setChemSearchOpen(false)}
+          onSelectResult={handleChemSearchResult}
+          inventoryItems={inventoryItems}
+          entries={entries}
+        />
+
         {adminOpen && user.role === "admin" && (
           <AdminPanel
             currentUserId={user.id}
@@ -1003,21 +1186,21 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
                     type="button"
                     onClick={() => void handleProjectExport("json")}
                   >
-                    {t("Export JSON")}
+                    📥 {t("Export JSON")}
                   </button>
                   <button
                     className="button button-outline"
                     type="button"
                     onClick={() => void handleProjectExport("csv")}
                   >
-                    {t("Export CSV")}
+                    📊 {t("Export CSV")}
                   </button>
                   <button
                     className="button button-outline"
                     type="button"
                     onClick={() => void handleProjectBundleExport()}
                   >
-                    {t("Export ZIP")}
+                    📦 {t("Export ZIP")}
                   </button>
                   {projectAccessRole !== null && projectAccessRole !== "viewer" && (
                     <form className="project-import-form" onSubmit={handleProjectImport}>
@@ -1129,6 +1312,43 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
                       >
                         <span>＋</span> {t("New entry")}
                       </button>
+                      <button
+                        className="button button-outline"
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            await api.exportAuditTrail(selectedExperimentData.id, "csv");
+                            setNotice("Audit trail CSV downloaded.");
+                          } catch {
+                            setError("Failed to download audit trail CSV.");
+                          }
+                        }}
+                      >
+                        Audit Trail (CSV)
+                      </button>
+                      <button
+                        className="button button-outline"
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            await api.exportAuditTrail(selectedExperimentData.id, "json");
+                            setNotice("Audit trail JSON downloaded.");
+                          } catch {
+                            setError("Failed to download audit trail JSON.");
+                          }
+                        }}
+                      >
+                        Audit Trail (JSON)
+                      </button>
+                      <button
+                        className="button button-primary"
+                        type="button"
+                        onClick={() => setFormalReportOpen(true)}
+                        style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "#3F1899", borderColor: "#3F1899" }}
+                        title="Generate regulatory-compliant GLP/GMP printable laboratory report"
+                      >
+                        📄 {t("Formal PDF Report")}
+                      </button>
                     </div>
                   </div>
                   <ExperimentApprovalPanel
@@ -1212,6 +1432,7 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
                               const form = event.currentTarget;
                               const values = new FormData(form);
                               const meaning = String(values.get("meaning"));
+                              const pass = String(values.get("signaturePassword") ?? "");
                               if (
                                 meaning === "authored" ||
                                 meaning === "reviewed" ||
@@ -1220,6 +1441,7 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
                                 void handleEntrySignature(
                                   meaning,
                                   String(values.get("comment") ?? ""),
+                                  pass,
                                 ).then((signed) => {
                                   if (signed) form.reset();
                                 });
@@ -1232,6 +1454,12 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
                               <option value="approved">Approved</option>
                             </select>
                             <input name="comment" maxLength={500} placeholder="Comment (optional)" />
+                            <input
+                              name="signaturePassword"
+                              type="password"
+                              placeholder="Password (21 CFR Part 11)"
+                              autoComplete="current-password"
+                            />
                             <label>
                               <input name="confirm" type="checkbox" required />
                               I intend to apply this signature to the current record.
@@ -1319,7 +1547,27 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
                           <MoleculeEditor
                             disabled={projectAccessRole === null || projectAccessRole === "viewer"}
                             onSave={handleSaveMolecule}
+                            onStructureChange={setActiveMoleculeStructure}
                             t={t}
+                          />
+                        </details>
+                        <details className="sketch-tools stoichiometry-tools">
+                          <summary>{t("Reaction & stoichiometry calculator")}</summary>
+                          <StoichiometryTable
+                            disabled={projectAccessRole === null || projectAccessRole === "viewer"}
+                            activeStructure={activeMoleculeStructure}
+                            inventoryItems={inventoryItems}
+                            onDeductStock={handleDeductStoichiometryStock}
+                            onSaveAttachment={handleSaveStoichiometryAttachment}
+                            onInsertMarkdown={handleInsertStoichiometryMarkdown}
+                            t={t}
+                          />
+                        </details>
+                        <details className="sketch-tools protocol-timer-tools">
+                          <summary>⏱️ Bench timers & protocol checklist</summary>
+                          <ProtocolStepTimer
+                            disabled={projectAccessRole === null || projectAccessRole === "viewer"}
+                            onInsertMarkdown={handleInsertStoichiometryMarkdown}
                           />
                         </details>
                         {historyOpen && (
@@ -1392,10 +1640,90 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
                         </div>
                         {editorMode === "preview" ? (
                           <div className="scientific-preview-container">
-                            <ScientificContent content={activeEntry.content} />
+                            <ScientificContent content={activeEntry.content} onNavigate={handleMentionNavigate} />
                           </div>
                         ) : (
                           <>
+                            <div className="mention-toolbar" style={{ display: "flex", gap: 6, marginBottom: 6, alignItems: "center", flexWrap: "wrap" }}>
+                              <small style={{ color: "#6b5f88", fontWeight: 600 }}>Insert Mention:</small>
+                              <select
+                                aria-label="Mention inventory reagent"
+                                defaultValue=""
+                                onChange={(e) => {
+                                  const id = parseInt(e.target.value, 10);
+                                  const item = inventoryItems.find((i) => i.id === id);
+                                  if (item) {
+                                    const textarea = document.getElementById("entry-content") as HTMLTextAreaElement | null;
+                                    if (textarea) {
+                                      const text = `[@${item.name}](#inv:${item.id}) `;
+                                      const start = textarea.selectionStart;
+                                      const end = textarea.selectionEnd;
+                                      textarea.setRangeText(text, start, end, "end");
+                                      textarea.focus();
+                                    }
+                                  }
+                                  e.target.value = "";
+                                }}
+                                style={{ fontSize: "0.78rem", padding: "2px 6px", borderRadius: 4, border: "1px solid #d8c8f7", color: "#3F1899" }}
+                              >
+                                <option value="">🧪 @ Reagent...</option>
+                                {inventoryItems.map((inv) => (
+                                  <option key={inv.id} value={inv.id}>{inv.name} ({inv.quantity} {inv.unit})</option>
+                                ))}
+                              </select>
+
+                              <select
+                                aria-label="Mention sample record"
+                                defaultValue=""
+                                onChange={(e) => {
+                                  const id = parseInt(e.target.value, 10);
+                                  const smp = samples.find((s) => s.id === id);
+                                  if (smp) {
+                                    const textarea = document.getElementById("entry-content") as HTMLTextAreaElement | null;
+                                    if (textarea) {
+                                      const text = `[#${smp.name}](#smp:${smp.id}) `;
+                                      const start = textarea.selectionStart;
+                                      const end = textarea.selectionEnd;
+                                      textarea.setRangeText(text, start, end, "end");
+                                      textarea.focus();
+                                    }
+                                  }
+                                  e.target.value = "";
+                                }}
+                                style={{ fontSize: "0.78rem", padding: "2px 6px", borderRadius: 4, border: "1px solid #c9b4f4", color: "#2b0f6c" }}
+                              >
+                                <option value="">🧬 # Sample...</option>
+                                {samples.map((s) => (
+                                  <option key={s.id} value={s.id}>{s.name} ({s.sample_type})</option>
+                                ))}
+                              </select>
+
+                              <select
+                                aria-label="Mention experiment"
+                                defaultValue=""
+                                onChange={(e) => {
+                                  const id = parseInt(e.target.value, 10);
+                                  const exp = experiments.find((x) => x.id === id);
+                                  if (exp) {
+                                    const textarea = document.getElementById("entry-content") as HTMLTextAreaElement | null;
+                                    if (textarea) {
+                                      const text = `[!${exp.name}](#exp:${exp.id}) `;
+                                      const start = textarea.selectionStart;
+                                      const end = textarea.selectionEnd;
+                                      textarea.setRangeText(text, start, end, "end");
+                                      textarea.focus();
+                                    }
+                                  }
+                                  e.target.value = "";
+                                }}
+                                style={{ fontSize: "0.78rem", padding: "2px 6px", borderRadius: 4, border: "1px solid #f9d8a7", color: "#92540c" }}
+                              >
+                                <option value="">📓 ! Experiment...</option>
+                                {experiments.map((exp) => (
+                                  <option key={exp.id} value={exp.id}>{exp.name}</option>
+                                ))}
+                              </select>
+                            </div>
                             <textarea
                               aria-label="Entry content"
                               id="entry-content"
@@ -1619,7 +1947,7 @@ function AuthScreen({
           String(form.get("email") ?? ""),
         );
         setRecoverySent(true);
-        return;
+  
       }
       await onLogin(
         organization,
@@ -1636,7 +1964,9 @@ function AuthScreen({
   return (
     <main className="auth-page">
       <form className="auth-card" onSubmit={submit}>
-        <div className="brand-mark">i</div>
+        <div className="brand-mark">
+            <img src="/app-icon.jpg" alt="Interactive ELN" />
+          </div>
         <p className="eyebrow">INTERACTIVE ELN</p>
         <h1>{recoveryMode ? "Reset your password" : "Welcome back"}</h1>
         <p className="auth-copy">
@@ -1728,7 +2058,7 @@ function PasswordResetScreen() {
     const password = String(form.get("password") ?? "");
     if (password !== String(form.get("confirm_password") ?? "")) {
       setError("The passwords do not match.");
-      return;
+
     }
     setError("");
     try {
@@ -1742,7 +2072,9 @@ function PasswordResetScreen() {
   return (
     <main className="auth-page">
       <form className="auth-card" onSubmit={(event) => void submit(event)}>
-        <div className="brand-mark">i</div>
+        <div className="brand-mark">
+            <img src="/app-icon.jpg" alt="Interactive ELN" />
+          </div>
         <p className="eyebrow">INTERACTIVE ELN</p>
         <h1>Choose a new password</h1>
         {complete ? (
@@ -1802,7 +2134,9 @@ function AcceptInvitationScreen() {
   return (
     <main className="auth-page">
       <form className="auth-card" onSubmit={submit}>
-        <div className="brand-mark">i</div>
+        <div className="brand-mark">
+            <img src="/app-icon.jpg" alt="Interactive ELN" />
+          </div>
         <p className="eyebrow">ORGANIZATION INVITATION</p>
         <h1>Join your research team</h1>
         {complete ? (
@@ -1993,6 +2327,7 @@ function AdminPanel({ onClose, currentUserId }: { onClose: () => void; currentUs
 function TaskPanel({ projectId, writable }: { projectId: number; writable: boolean }) {
   const [tasks, setTasks] = useState<LabTask[]>([]);
   const [error, setError] = useState("");
+  const [viewMode, setViewMode] = useState<"list" | "dag">("list");
 
   const loadTasks = useCallback(async () => {
     try {
@@ -2048,8 +2383,36 @@ function TaskPanel({ projectId, writable }: { projectId: number; writable: boole
           <h2>Tasks and workflow</h2>
           <p>Track actionable work against this project.</p>
         </div>
-        <span className="count-pill">{tasks.length}</span>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+          <button
+            className={viewMode === "list" ? "button button-primary" : "button button-outline"}
+            type="button"
+            onClick={() => setViewMode("list")}
+            style={{ padding: "0.25rem 0.6rem", fontSize: "0.8rem" }}
+          >
+            List View
+          </button>
+          <button
+            className={viewMode === "dag" ? "button button-primary" : "button button-outline"}
+            type="button"
+            onClick={() => setViewMode("dag")}
+            style={{ padding: "0.25rem 0.6rem", fontSize: "0.8rem" }}
+          >
+            Visual DAG Canvas
+          </button>
+          <span className="count-pill">{tasks.length}</span>
+        </div>
       </div>
+      {viewMode === "dag" && (
+        <WorkflowDagCanvas
+          tasks={tasks}
+          disabled={!writable}
+          onUpdateTaskStatus={async (taskId, status) => {
+            await api.updateTaskStatus(taskId, status);
+            await loadTasks();
+          }}
+        />
+      )}
       {error && <p className="inline-error" role="alert">{error}</p>}
       {writable && (
         <form className="task-create-form" onSubmit={createTask}>
@@ -2478,6 +2841,7 @@ function InventoryPanel({
 }) {
   const [items, setItems] = useState<InventoryItem[]>([]);
   const [samples, setSamples] = useState<SampleRecord[]>([]);
+  const [labelData, setLabelData] = useState<LabelData | null>(null);
   const [storageLocations, setStorageLocations] = useState<StorageLocation[]>([]);
   const [customFieldDefinitions, setCustomFieldDefinitions] = useState<InventoryCustomFieldDefinition[]>([]);
   const [editingCustomFieldId, setEditingCustomFieldId] = useState<number | null>(null);
@@ -2635,7 +2999,7 @@ function InventoryPanel({
       : undefined;
     if (parentSample?.project_id && projectIdValue && Number(projectIdValue) !== parentSample.project_id) {
       setError("A derived sample must remain in its parent sample's project.");
-      return;
+
     }
     try {
       await api.createSample({
@@ -2831,6 +3195,31 @@ function InventoryPanel({
       </form>
       {user.role === "admin" && <section className="inventory-custom-field-admin" aria-label="Inventory field settings">
         <h4>Custom inventory fields</h4>
+        <div style={{ marginBottom: "0.75rem" }}>
+          <label className="button button-outline" style={{ cursor: "pointer", display: "inline-block" }}>
+            Import eLabFTW Schema (.json)
+            <input
+              type="file"
+              accept=".json,application/json"
+              style={{ display: "none" }}
+              onChange={async (e) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+                try {
+                  const text = await file.text();
+                  const parsed = JSON.parse(text);
+                  const result = await api.importElabftwSchema(parsed);
+                  setNotice(`Imported ${result.imported_count} custom fields from eLabFTW schema (skipped ${result.skipped_count} existing).`);
+                  const updated = await api.inventoryCustomFields();
+                  setCustomFieldDefinitions(updated);
+                } catch (err) {
+                  setError(err instanceof Error ? err.message : "Failed to import eLabFTW schema.");
+                }
+                e.target.value = "";
+              }}
+            />
+          </label>
+        </div>
         <form className="inventory-form" onSubmit={(event) => void createCustomFieldDefinition(event)}>
           <input name="name" placeholder="Field name" required maxLength={120} />
           <select name="field_type" defaultValue="text">
@@ -2874,6 +3263,18 @@ function InventoryPanel({
                 <span className={`status-chip ${item.status === "archived" ? "status-archived" : item.quantity <= item.low_stock_threshold ? "status-low-stock" : ""}`}>
                   {item.status === "archived" ? "Archived" : `${item.quantity} ${item.unit}${item.quantity <= item.low_stock_threshold ? " · low stock" : ""}`}
                 </span>
+                <button
+                  className="button button-outline"
+                  type="button"
+                  onClick={() => setLabelData({
+                    title: item.name,
+                    idCode: `INV-${item.id}`,
+                    type: item.category,
+                  })}
+                  style={{ padding: "0.2rem 0.5rem", fontSize: "0.75rem" }}
+                >
+                  🏷️ Label / QR
+                </button>
                 <button
                   className="button button-outline"
                   type="button"
@@ -2941,6 +3342,19 @@ function InventoryPanel({
               <strong>{sample.name}</strong>
               <div>
                 <span className="status-chip">{sample.status === "archived" ? "Archived" : sample.sample_type}</span>
+                <button
+                  className="button button-outline"
+                  type="button"
+                  onClick={() => setLabelData({
+                    title: sample.name,
+                    idCode: sample.external_id || `SMP-${sample.id}`,
+                    type: sample.sample_type,
+                    creator: `User #${sample.created_by_user_id}`,
+                  })}
+                  style={{ padding: "0.2rem 0.5rem", fontSize: "0.75rem" }}
+                >
+                  🏷️ Label / QR
+                </button>
                 <button
                   className="button button-outline"
                   type="button"
@@ -3033,6 +3447,7 @@ function InventoryPanel({
         ))}
         {samples.length === 0 && <p className="empty-hint">No samples registered yet.</p>}
       </div>
+      {labelData && <LabLabelGenerator data={labelData} onClose={() => setLabelData(null)} />}
     </section>
   );
 }
@@ -3292,15 +3707,60 @@ function EquipmentPanel({
     const startValue = String(form.get("starts_at") ?? "");
     const endValue = String(form.get("ends_at") ?? "");
     const projectIdValue = String(form.get("project_id") ?? "");
+
     try {
-      await api.createBooking(equipmentId, {
-        starts_at: new Date(startValue).toISOString(),
-        ends_at: new Date(endValue).toISOString(),
-        purpose: String(form.get("purpose") ?? ""),
-        project_id: projectIdValue ? Number(projectIdValue) : null,
-      });
+      const isRecurring = form.get("is_recurring") === "on";
+      const recurrenceUnit = String(form.get("recurrence_unit") ?? "week") as "day" | "week" | "month";
+      const recurrenceInterval = Number(form.get("recurrence_interval") ?? 1);
+      const recurrenceCount = form.get("recurrence_count") ? Number(form.get("recurrence_count")) : undefined;
+      const recurrenceUntil = String(form.get("recurrence_until") ?? "") || undefined;
+      if (isRecurring) {
+        await api.createRecurringBooking(equipmentId, {
+          starts_at: new Date(startValue).toISOString(),
+          ends_at: new Date(endValue).toISOString(),
+          purpose: String(form.get("purpose") ?? ""),
+          project_id: projectIdValue ? Number(projectIdValue) : null,
+          recurrence_unit: recurrenceUnit,
+          recurrence_interval: recurrenceInterval > 0 ? recurrenceInterval : 1,
+          recurrence_count: recurrenceCount && recurrenceCount > 0 ? recurrenceCount : undefined,
+          recurrence_until: recurrenceUntil,
+        });
+        setNotice(t("Recurring equipment bookings created."));
+      } else {
+        await api.createBooking(equipmentId, {
+          starts_at: new Date(startValue).toISOString(),
+          ends_at: new Date(endValue).toISOString(),
+          purpose: String(form.get("purpose") ?? ""),
+          project_id: projectIdValue ? Number(projectIdValue) : null,
+        });
+        setNotice(t("Equipment booking created."));
+      }
       formElement.reset();
-      setNotice(t("Equipment booking created."));
+      await loadSchedule();
+
+      if (isRecurring) {
+        await api.createRecurringBooking(equipmentId, {
+          starts_at: new Date(startValue).toISOString(),
+          ends_at: new Date(endValue).toISOString(),
+          purpose: String(form.get("purpose") ?? ""),
+          project_id: projectIdValue ? Number(projectIdValue) : null,
+          recurrence_unit: recurrenceUnit,
+          recurrence_interval: recurrenceInterval > 0 ? recurrenceInterval : 1,
+          recurrence_count: recurrenceCount && recurrenceCount > 0 ? recurrenceCount : undefined,
+          recurrence_until: recurrenceUntil,
+        });
+        formElement.reset();
+        setNotice(t("Recurring equipment bookings created."));
+      } else {
+        await api.createBooking(equipmentId, {
+          starts_at: new Date(startValue).toISOString(),
+          ends_at: new Date(endValue).toISOString(),
+          purpose: String(form.get("purpose") ?? ""),
+          project_id: projectIdValue ? Number(projectIdValue) : null,
+        });
+        formElement.reset();
+        setNotice(t("Equipment booking created."));
+      }
       await loadSchedule();
     } catch (err) {
       setError(err instanceof Error ? err.message : t("Unable to book equipment."));
@@ -3491,6 +3951,28 @@ function EquipmentPanel({
                 <option value="">{t("Organization-level")}</option>
                 {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
               </select>
+              <details style={{ gridColumn: "1 / -1", margin: "4px 0" }}>
+                <summary style={{ fontSize: "11px", color: "#477b61", cursor: "pointer", fontWeight: 600 }}>
+                  {t("Repeat booking options")}
+                </summary>
+                <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap", paddingTop: "8px", fontSize: "11px" }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: "5px" }}>
+                    <input type="checkbox" name="is_recurring" />
+                    {t("Enable recurrence")}
+                  </label>
+                  <span>{t("Every")}</span>
+                  <input name="recurrence_interval" type="number" min="1" max="30" defaultValue="1" style={{ width: "50px", minHeight: "28px" }} />
+                  <select name="recurrence_unit" defaultValue="week" style={{ width: "95px", minHeight: "28px" }}>
+                    <option value="day">{t("Day(s)")}</option>
+                    <option value="week">{t("Week(s)")}</option>
+                    <option value="month">{t("Month(s)")}</option>
+                  </select>
+                  <span>{t("Count")}</span>
+                  <input name="recurrence_count" type="number" min="1" max="50" defaultValue="4" style={{ width: "55px", minHeight: "28px" }} />
+                  <span>{t("or until")}</span>
+                  <input name="recurrence_until" type="date" style={{ width: "135px", minHeight: "28px" }} />
+                </div>
+              </details>
               <button className="button button-outline" type="submit">{t("Book")}</button>
             </form>}
           </article>
@@ -3564,6 +4046,12 @@ function StorageLocationsPanel({ user, onClose }: { user: AuthUser; onClose: () 
   const [editingId, setEditingId] = useState<number | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [samples, setSamples] = useState<SampleRecord[]>([]);
+  const [gridLocation, setGridLocation] = useState<StorageLocation | null>(null);
+
+  useEffect(() => {
+    void api.samples().then(setSamples).catch(() => {});
+  }, []);
 
   const loadLocations = useCallback(async () => {
     try {
@@ -3692,6 +4180,29 @@ function StorageLocationsPanel({ user, onClose }: { user: AuthUser; onClose: () 
       </form>
       </>}
 
+      {gridLocation && (
+        <StorageBoxGrid
+          location={gridLocation}
+          samples={samples}
+          disabled={user.role !== "admin"}
+          onAssignCoordinate={async (sampleId, coord) => {
+            await api.moveSample(sampleId, {
+              storage_location_id: gridLocation.id,
+              storage_location: `[${coord}]`,
+            });
+            setSamples(await api.samples());
+            setNotice(`Sample placed in slot ${coord}.`);
+          }}
+          onClearCoordinate={async (sampleId) => {
+            await api.moveSample(sampleId, {
+              storage_location_id: gridLocation.id,
+              storage_location: "",
+            });
+            setSamples(await api.samples());
+            setNotice("Sample removed from coordinate slot.");
+          }}
+        />
+      )}
       <h3 className="inventory-subheading">Configured locations ({locations.length})</h3>
       <div className="location-list">
         {locations.map((loc) => (
@@ -3719,6 +4230,14 @@ function StorageLocationsPanel({ user, onClose }: { user: AuthUser; onClose: () 
               {loc.description && <p className="location-description">{loc.description}</p>}
             </div>}
             <div className="location-card-meta">
+              <button
+                className="button button-outline"
+                type="button"
+                onClick={() => setGridLocation(gridLocation?.id === loc.id ? null : loc)}
+                style={{ padding: "0.2rem 0.5rem", fontSize: "0.75rem" }}
+              >
+                {gridLocation?.id === loc.id ? "Close Grid" : "2D Grid View"}
+              </button>
               <span className={`status-chip ${loc.status === "archived" ? "status-archived" : "status-completed"}`}>
                 {loc.status}
               </span>

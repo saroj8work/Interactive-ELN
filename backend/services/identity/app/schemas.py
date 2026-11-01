@@ -22,6 +22,10 @@ class InvitationAccept(BaseModel):
     password: str = Field(min_length=12, max_length=128)
 
 
+class VerifyPasswordRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=128)
+
+
 class LoginRequest(BaseModel):
     organization_slug: str = Field(min_length=1, max_length=80)
     email: EmailStr

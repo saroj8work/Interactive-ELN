@@ -364,6 +364,12 @@ class IdentityService:
     def get_user(self, user_id: int) -> User | None:
         return self._repository.get_user(user_id)
 
+    def verify_user_password(self, user_id: int, password: str) -> bool:
+        user = self._repository.get_user(user_id)
+        if user is None or not user.is_active or not user.password_hash:
+            return False
+        return verify_password(password, user.password_hash)
+
     def get_membership(
         self, organization_id: int, user_id: int
     ) -> Membership | None:

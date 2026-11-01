@@ -1,7 +1,7 @@
 from datetime import date, datetime, timezone
 from decimal import Decimal
 import re
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -424,7 +424,7 @@ class EntryTimestampRead(BaseModel):
 
     @field_validator("tsa_time", "created_at", mode="before")
     @classmethod
-    def assume_utc_for_naive_database_timestamps(cls, value: datetime) -> datetime:
+    def assume_utc_for_naive_database_timestamps(cls, value: Any) -> Any:
         if isinstance(value, datetime) and value.tzinfo is None:
             return value.replace(tzinfo=timezone.utc)
         return value
@@ -630,6 +630,7 @@ class RecordSignatureCreate(BaseModel):
     entity_id: int = Field(gt=0)
     meaning: Literal["authored", "reviewed", "approved"]
     comment: str = Field(default="", max_length=500)
+    password: str | None = Field(default=None, max_length=128)
 
 
 class RecordSignatureRead(BaseModel):
@@ -654,6 +655,31 @@ class AuditVerificationRead(BaseModel):
     checked_events: int
 
 
+class AuditEventRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    organization_id: int
+    actor_user_id: int
+    action: str
+    entity_type: str
+    entity_id: int
+    payload_json: str
+    previous_hash: str
+    event_hash: str
+    created_at: datetime
+
+
+class InboundInstrumentPayload(BaseModel):
+    instrument_name: str = Field(min_length=1, max_length=160)
+    experiment_id: int | None = None
+    entry_id: int | None = None
+    measurement_type: str = Field(default="measurement", max_length=80)
+    readings: list[dict[str, Any]] = Field(default_factory=list)
+    raw_data: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class EquipmentBookingCreate(BaseModel):
     starts_at: datetime
     ends_at: datetime
@@ -666,6 +692,27 @@ class EquipmentBookingCreate(BaseModel):
             raise ValueError("Booking timestamps must include a timezone.")
         if self.ends_at <= self.starts_at:
             raise ValueError("Booking end must be after booking start.")
+        return self
+
+
+class RecurringEquipmentBookingCreate(BaseModel):
+    starts_at: datetime
+    ends_at: datetime
+    purpose: str = Field(min_length=1, max_length=500)
+    project_id: int | None = Field(default=None, gt=0)
+    recurrence_unit: Literal["day", "week", "month"] = Field(default="week")
+    recurrence_interval: int = Field(default=1, ge=1, le=30)
+    recurrence_count: int | None = Field(default=None, ge=1, le=50)
+    recurrence_until: date | None = None
+
+    @model_validator(mode="after")
+    def validate_recurring_parameters(self) -> "RecurringEquipmentBookingCreate":
+        if self.starts_at.tzinfo is None or self.ends_at.tzinfo is None:
+            raise ValueError("Booking timestamps must include a timezone.")
+        if self.ends_at <= self.starts_at:
+            raise ValueError("Booking end must be after booking start.")
+        if self.recurrence_count is None and self.recurrence_until is None:
+            raise ValueError("Specify either recurrence_count or recurrence_until.")
         return self
 
 
@@ -689,8 +736,8 @@ class EquipmentBookingRead(BaseModel):
 
     @field_validator("starts_at", "ends_at", mode="before")
     @classmethod
-    def assume_utc_for_naive_database_timestamps(cls, value: datetime) -> datetime:
-        if value.tzinfo is None:
+    def assume_utc_for_naive_database_timestamps(cls, value: Any) -> Any:
+        if isinstance(value, datetime) and value.tzinfo is None:
             return value.replace(tzinfo=timezone.utc)
         return value
 
@@ -762,7 +809,7 @@ class EquipmentMaintenanceRead(EquipmentMaintenanceCreate):
     @field_validator("starts_at", "ends_at", "created_at", mode="before")
     @classmethod
     def assume_utc_for_naive_timestamps(cls, value: datetime) -> datetime:
-        if value.tzinfo is None:
+        if isinstance(value, datetime) and value.tzinfo is None:
             return value.replace(tzinfo=timezone.utc)
         return value
 

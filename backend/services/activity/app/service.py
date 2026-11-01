@@ -1,5 +1,35 @@
+import os
 import secrets
+import smtplib
+from email.message import EmailMessage
 from datetime import datetime, timezone
+
+def _send_notification_email(to_email: str, subject: str, message: str) -> bool:
+    host = os.getenv("SMTP_HOST")
+    sender = os.getenv("SMTP_FROM")
+    if not host or not sender or not to_email:
+        return False
+    try:
+        email = EmailMessage()
+        email["Subject"] = subject
+        email["To"] = to_email
+        email["From"] = sender
+        app_url = os.getenv("PUBLIC_APP_URL", "http://localhost:5173")
+        email.set_content(
+            f"{subject}\n\n{message}\n\nView details in Interactive ELN:\n{app_url}\n"
+        )
+        port = int(os.getenv("SMTP_PORT", "587"))
+        with smtplib.SMTP(host, port, timeout=10) as smtp:
+            if os.getenv("SMTP_STARTTLS", "true").lower() == "true":
+                smtp.starttls()
+            username = os.getenv("SMTP_USERNAME")
+            password = os.getenv("SMTP_PASSWORD")
+            if username and password:
+                smtp.login(username, password)
+            smtp.send_message(email)
+        return True
+    except Exception:
+        return False
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -37,6 +67,7 @@ class ActivityService:
         event = self._repository.add_if_new(event)
         self._create_approval_notifications(event)
         self._create_sample_custody_notification(event)
+        self._create_task_progression_notification(event)
         event_type = f"{event.source_service}.{event.action}"
         endpoints = self._db.scalars(
             select(WebhookEndpoint).where(
@@ -223,6 +254,45 @@ class ActivityService:
             details={"action": event.action, "transfer_id": details.get("transfer_id", "")},
             created_at=event.occurred_at,
         ))
+        recipient_email = details.get("recipient_email", "")
+        if recipient_email:
+            _send_notification_email(recipient_email, title, message)
+
+    def _create_task_progression_notification(self, event: ActivityEvent) -> None:
+        if event.action != "experiment_all_tasks_completed":
+            return
+        details = event.details
+        name = details.get("experiment_name", "Experiment")
+        experiment_id = details.get("experiment_id", str(event.entity_id))
+        created_by = details.get("created_by_user_id", "")
+        recipient_id = int(created_by) if created_by.isdigit() else 0
+        if recipient_id <= 0:
+            return
+        existing = self._db.scalar(
+            select(Notification.id).where(
+                Notification.organization_id == event.organization_id,
+                Notification.user_id == recipient_id,
+                Notification.event_id == event.event_id,
+            )
+        )
+        if existing is not None:
+            return
+        title = f"All tasks completed: {name}"
+        message = "All assigned workflow tasks for this experiment have been completed."
+        self._db.add(Notification(
+            organization_id=event.organization_id,
+            user_id=recipient_id,
+            event_id=event.event_id,
+            title=title[:200],
+            message=message,
+            entity_type="experiment",
+            entity_id=int(experiment_id) if experiment_id.isdigit() else event.entity_id,
+            details=details,
+            created_at=event.occurred_at,
+        ))
+        recipient_email = details.get("recipient_email", "")
+        if recipient_email:
+            _send_notification_email(recipient_email, title, message)
 
     def list_webhook_endpoints(self, organization_id: int) -> list[WebhookEndpoint]:
         return list(self._db.scalars(

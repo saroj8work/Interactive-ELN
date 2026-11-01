@@ -1,8 +1,9 @@
-import { useMemo, useRef, useState, type MouseEvent, type PointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent } from "react";
+import { detectStereocenters, detectDoubleBondStereo } from "./chemistryUtils";
 
-type Atom = { id: number; element: string; formalCharge: number; x: number; y: number };
-type Bond = { id: number; from: number; to: number; order: 1 | 2 | 3 | 4; stereo: 0 | 1 | 4 | 6 };
-type Structure = { atoms: Atom[]; bonds: Bond[] };
+export type Atom = { id: number; element: string; formalCharge: number; x: number; y: number };
+export type Bond = { id: number; from: number; to: number; order: 1 | 2 | 3 | 4; stereo: 0 | 1 | 4 | 6 };
+export type Structure = { atoms: Atom[]; bonds: Bond[] };
 type Tool = "atom" | "bond" | "select";
 
 const ELEMENTS = ["C", "N", "O", "S", "P", "F", "Cl", "Br", "I", "H", "B", "Si", "Se", "Na", "K", "Ca", "Mg", "Li", "Al", "Fe", "Cu", "Zn"];
@@ -356,7 +357,17 @@ function moleculeSmiles(structure: Structure): string {
   return components.map((id) => render(id)).join(".");
 }
 
-export function MoleculeEditor({ disabled, onSave, t }: { disabled: boolean; onSave: (files: File[]) => Promise<void>; t: (text: string) => string }) {
+export function MoleculeEditor({
+  disabled,
+  onSave,
+  onStructureChange,
+  t,
+}: {
+  disabled: boolean;
+  onSave: (files: File[]) => Promise<void>;
+  onStructureChange?: (structure: Structure) => void;
+  t: (text: string) => string;
+}) {
   const [structure, setStructure] = useState<Structure>({ atoms: [], bonds: [] });
   const [previous, setPrevious] = useState<Structure | null>(null);
   const [tool, setTool] = useState<Tool>("atom");
@@ -371,6 +382,15 @@ export function MoleculeEditor({ disabled, onSave, t }: { disabled: boolean; onS
   const dragSnapshot = useRef<Structure | null>(null);
   const preview = useMemo(() => moleculeSvg(structure), [structure]);
   const issues = useMemo(() => structureIssues(structure), [structure]);
+
+  const stereocenters = useMemo(() => detectStereocenters(structure), [structure]);
+  const doubleBonds = useMemo(() => detectDoubleBondStereo(structure), [structure]);
+  const chiralAtomIds = useMemo(() => new Set(stereocenters.map((c) => c.atomId)), [stereocenters]);
+  const doubleBondMap = useMemo(() => new Map(doubleBonds.map((b) => [b.bondId, b])), [doubleBonds]);
+
+  useEffect(() => {
+    onStructureChange?.(structure);
+  }, [structure, onStructureChange]);
 
   function commit(next: Structure) {
     setPrevious(structure);
@@ -592,13 +612,31 @@ export function MoleculeEditor({ disabled, onSave, t }: { disabled: boolean; onS
               return Array.from({ length: 7 }, (_, index) => { const ratio = (index + 1) / 8; const half = ratio * 5; const cx = from.x + dx * ratio; const cy = from.y + dy * ratio; return <line key={`${bond.id}-${index}`} className={selectedClass} x1={cx - px * half} y1={cy - py * half} x2={cx + px * half} y2={cy + py * half} onClick={onSelectBond} />; });
             }
             const lineCount = bond.order === 4 ? 2 : bond.order;
-            return Array.from({ length: lineCount }, (_, index) => {
-              const offset = (index - (bond.order === 4 ? 0.5 : (bond.order - 1) / 2)) * 8;
-              return <line key={`${bond.id}-${index}`} className={selectedBond === bond.id ? "is-selected" : ""}
-                strokeDasharray={bond.order === 4 && index === 1 ? "2 3" : undefined}
-                x1={from.x + ox * offset} y1={from.y + oy * offset} x2={to.x + ox * offset} y2={to.y + oy * offset}
-                onClick={(event) => { event.stopPropagation(); setSelectedBond(bond.id); setSelected(null); }} />;
-            });
+            const dbInfo = doubleBondMap.get(bond.id);
+            return (
+              <g key={bond.id}>
+                {Array.from({ length: lineCount }, (_, index) => {
+                  const offset = (index - (bond.order === 4 ? 0.5 : (bond.order - 1) / 2)) * 8;
+                  return <line key={`${bond.id}-${index}`} className={selectedBond === bond.id ? "is-selected" : ""}
+                    strokeDasharray={bond.order === 4 && index === 1 ? "2 3" : undefined}
+                    x1={from.x + ox * offset} y1={from.y + oy * offset} x2={to.x + ox * offset} y2={to.y + oy * offset}
+                    onClick={(event) => { event.stopPropagation(); setSelectedBond(bond.id); setSelected(null); }} />;
+                })}
+                {dbInfo && dbInfo.configuration !== "unspecified" && (
+                  <text
+                    x={(from.x + to.x) / 2 + ox * 3}
+                    y={(from.y + to.y) / 2 + oy * 3}
+                    fontSize="11"
+                    fontWeight="bold"
+                    fill="#a0522d"
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                  >
+                    ({dbInfo.configuration})
+                  </text>
+                )}
+              </g>
+            );
           })}
         </g>
         {structure.atoms.map((atom) => (
@@ -609,10 +647,23 @@ export function MoleculeEditor({ disabled, onSave, t }: { disabled: boolean; onS
             <circle cx={atom.x} cy={atom.y} r="17" className={selected === atom.id || bondStart === atom.id ? "is-selected" : ""} />
             <text x={atom.x} y={atom.y} textAnchor="middle" dominantBaseline="central">{atom.element}</text>
             {atom.formalCharge !== 0 && <text x={atom.x + 12} y={atom.y - 11} fontSize="11" textAnchor="middle">{atom.formalCharge > 0 ? "+" : "-"}{Math.abs(atom.formalCharge) === 1 ? "" : Math.abs(atom.formalCharge)}</text>}
+            {chiralAtomIds.has(atom.id) && (
+              <text x={atom.x - 13} y={atom.y - 12} fontSize="14" fill="#1b633b" fontWeight="bold" textAnchor="middle"><title>{t("Chiral stereocenter")}</title>*</text>
+            )}
           </g>
         ))}
         {structure.atoms.length === 0 && <text x={WIDTH / 2} y={HEIGHT / 2} textAnchor="middle" className="molecule-placeholder">{t("Click to place the first atom")}</text>}
       </svg>
+      {stereocenters.length > 0 && (
+        <div style={{ fontSize: "11px", color: "#1b633b", fontWeight: 600 }}>
+          ★ {t("Chiral stereocenters detected:")} {stereocenters.map((c) => `${c.element}${c.atomId}`).join(", ")}
+        </div>
+      )}
+      {doubleBonds.length > 0 && (
+        <div style={{ fontSize: "11px", color: "#a0522d", fontWeight: 600 }}>
+          ⚯ {t("Geometric configurations:")} {doubleBonds.map((b) => `Bond #${b.bondId} (${b.configuration})`).join(", ")}
+        </div>
+      )}
       {issues.length > 0 && <div className="inline-error molecule-validation" role="alert">{issues.join(" ")}</div>}
       <small>{t("Charge-aware valence checks cover common charged states for B, C, N, O, P, S, and Se. Other charge states are preserved in JSON and V2000 files but are not chemically validated here.")}</small>
       {structure.bonds.some((bond) => bond.stereo !== 0) && <small>{t("SMILES export is disabled while wedge, hash, or either bond markers are present because this editor does not assign stereochemical SMILES notation.")}</small>}

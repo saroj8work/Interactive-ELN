@@ -2,18 +2,22 @@ import asyncio
 import httpx
 import io
 import json
+import os
 import csv
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+import calendar
 from pathlib import PurePosixPath
 from urllib.parse import quote
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile, ZipInfo
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
 from pydantic import TypeAdapter, ValidationError
 
 from eln_common.contracts import (
+    AuditEventRead,
     AuditVerificationRead,
+    InboundInstrumentPayload,
     AttachmentRead,
     ActivityEventRead,
     NotificationRead,
@@ -22,6 +26,7 @@ from eln_common.contracts import (
     EntryRevisionRead,
     EntryUpdate,
     EquipmentBookingCreate,
+    RecurringEquipmentBookingCreate,
     EquipmentBookingRead,
     EquipmentCalendarImportResult,
     EquipmentCreate,
@@ -142,6 +147,7 @@ PROJECT_IMPORT_RESULT = TypeAdapter(ProjectImportResult)
 SIGNATURE_LIST = TypeAdapter(list[RecordSignatureRead])
 SIGNATURE = TypeAdapter(RecordSignatureRead)
 AUDIT_VERIFICATION = TypeAdapter(AuditVerificationRead)
+AUDIT_EVENTS = TypeAdapter(list[AuditEventRead])
 STORAGE_LOCATIONS = TypeAdapter(list[StorageLocationRead])
 STORAGE_LOCATION = TypeAdapter(StorageLocationRead)
 WORKFLOW_RULES = TypeAdapter(list[WorkflowRuleRead])
@@ -248,18 +254,86 @@ async def list_webhook_integration_deliveries(
 
 
 @integrations_router.delete("/webhooks/{endpoint_id}", status_code=204)
-async def revoke_webhook_integration(
-    endpoint_id: int,
-    client: ServiceClientDep,
-    principal: PrincipalDep,
-) -> None:
-    if principal.role != "admin":
-        raise HTTPException(status_code=403, detail="Organization admin role required.")
-    await client.delete(
+async def revoke_webhook_endpoint(
+    endpoint_id: int, client: ServiceClientDep, principal: PrincipalDep
+) -> Response:
+    return await client.delete(
         "activity", f"/integrations/webhooks/{endpoint_id}", NO_CONTENT,
         organization_id=principal.organization_id, user_id=principal.user_id,
         organization_role=principal.role,
     )
+
+
+@integrations_router.post("/webhooks/inbound/{token}")
+@activity_router.post("/webhooks/inbound/{token}")
+async def inbound_instrument_measurement(
+    token: str,
+    payload: InboundInstrumentPayload,
+    client: ServiceClientDep,
+    request: Request,
+) -> dict[str, Any]:
+    configured_secret = os.getenv("ELN_INBOUND_WEBHOOK_SECRET", "")
+    if configured_secret and not hmac.compare_digest(token, configured_secret):
+        raise HTTPException(status_code=401, detail="Invalid instrument webhook token.")
+    org_id = 1
+    target_entry_id = payload.entry_id
+    if payload.entry_id:
+        entry = await client.get(
+            "notebook", f"/entries/{payload.entry_id}", ENTRY,
+            organization_id=org_id,
+        )
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        measurement_text = f"\n\n### Inbound Instrument Data: {payload.instrument_name}\n"
+        measurement_text += f"*Recorded: {ts} | Type: {payload.measurement_type}*\n\n"
+        if payload.readings:
+            headers = list(payload.readings[0].keys())
+            measurement_text += "| " + " | ".join(headers) + " |\n"
+            measurement_text += "| " + " | ".join(["---"] * len(headers)) + " |\n"
+            for row in payload.readings:
+                measurement_text += "| " + " | ".join(str(row.get(h, "")) for h in headers) + " |\n"
+            measurement_text += "\n"
+        if payload.raw_data:
+            measurement_text += f"```text\n{payload.raw_data}\n```\n"
+        updated_content = entry.content + measurement_text
+        await client.put(
+            "notebook", f"/entries/{payload.entry_id}",
+            {"title": entry.title, "content": updated_content},
+            ENTRY,
+            organization_id=org_id,
+            user_id=1,
+            organization_role="admin",
+        )
+        target_entry_id = entry.id
+    elif payload.experiment_id:
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        measurement_text = f"### Inbound Instrument Data: {payload.instrument_name}\n"
+        measurement_text += f"*Recorded: {ts} | Type: {payload.measurement_type}*\n\n"
+        if payload.readings:
+            headers = list(payload.readings[0].keys())
+            measurement_text += "| " + " | ".join(headers) + " |\n"
+            measurement_text += "| " + " | ".join(["---"] * len(headers)) + " |\n"
+            for row in payload.readings:
+                measurement_text += "| " + " | ".join(str(row.get(h, "")) for h in headers) + " |\n"
+            measurement_text += "\n"
+        if payload.raw_data:
+            measurement_text += f"```text\n{payload.raw_data}\n```\n"
+        new_entry = await client.post(
+            "notebook", f"/experiments/{payload.experiment_id}/entries",
+            {"title": f"Instrument Reading - {payload.instrument_name}", "content": measurement_text},
+            ENTRY,
+            organization_id=org_id,
+            user_id=1,
+            organization_role="admin",
+        )
+        target_entry_id = new_entry.id
+    else:
+        raise HTTPException(status_code=400, detail="Either entry_id or experiment_id must be provided.")
+    return {
+        "status": "success",
+        "instrument": payload.instrument_name,
+        "readings_count": len(payload.readings),
+        "target_entry_id": target_entry_id,
+    }
 
 
 @booking_router.get("/calendar-feeds/{feed_id}.ics")
@@ -1478,7 +1552,18 @@ async def create_entry_signature(
     payload: RecordSignatureCreate,
     client: ServiceClientDep,
     principal: PrincipalDep,
+    request: Request,
 ) -> RecordSignatureRead:
+    if payload.password:
+        identity_client: httpx.AsyncClient = request.app.state.identity_client
+        auth_header = request.headers.get("Authorization", "")
+        auth_resp = await identity_client.post(
+            f"{request.app.state.settings.identity_service_url}/auth/verify-password",
+            json={"password": payload.password},
+            headers={"Authorization": auth_header},
+        )
+        if auth_resp.status_code != 200 or not auth_resp.json().get("valid"):
+            raise HTTPException(status_code=401, detail="Invalid password for electronic signature re-authentication.")
     entry = await client.get(
         "notebook", f"/entries/{entry_id}", ENTRY,
         organization_id=principal.organization_id,
@@ -1519,6 +1604,81 @@ async def list_entry_signatures(
         f"/entries/{entry_id}/signatures",
         SIGNATURE_LIST,
         organization_id=principal.organization_id,
+    )
+
+
+@notebook_router.get("/api/experiments/{experiment_id}/audit-trail/export")
+async def export_experiment_audit_trail(
+    experiment_id: int,
+    client: ServiceClientDep,
+    principal: PrincipalDep,
+    format: str = Query(default="json", pattern="^(json|csv)$"),
+) -> Response:
+    experiment = await client.get(
+        "notebook", f"/experiments/{experiment_id}", EXPERIMENT,
+        organization_id=principal.organization_id,
+    )
+    await _require_project_access(client, principal, experiment.project_id, write=False)
+    entries = await client.get(
+        "notebook", f"/experiments/{experiment_id}/entries", ENTRY_LIST,
+        organization_id=principal.organization_id,
+    )
+    entry_ids = {e.id for e in entries}
+    raw_events = await client.get(
+        "notebook", "/audit/events", AUDIT_EVENTS,
+        organization_id=principal.organization_id,
+    )
+    relevant_events = [
+        ev for ev in raw_events
+        if (ev.entity_type == "experiment" and ev.entity_id == experiment_id)
+        or (ev.entity_type == "entry" and ev.entity_id in entry_ids)
+    ]
+    verification = await client.get(
+        "notebook", "/audit/verify", AUDIT_VERIFICATION,
+        organization_id=principal.organization_id,
+    )
+    if format == "csv":
+        import csv, io
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow([
+            "Event ID", "Timestamp (UTC)", "Actor User ID", "Action",
+            "Entity Type", "Entity ID", "Event Hash", "Previous Hash", "Payload"
+        ])
+        for ev in relevant_events:
+            writer.writerow([
+                ev.id,
+                ev.created_at.isoformat(),
+                ev.actor_user_id,
+                ev.action,
+                ev.entity_type,
+                ev.entity_id,
+                ev.event_hash,
+                ev.previous_hash,
+                ev.payload_json,
+            ])
+        return Response(
+            content=buf.getvalue().encode("utf-8"),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="audit_trail_exp_{experiment_id}.csv"'},
+        )
+    result_data = {
+        "experiment_id": experiment_id,
+        "experiment_title": experiment.name,
+        "hmac_valid": verification.valid,
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "integrity_verification": {
+            "valid": verification.valid,
+            "checked_events": verification.checked_events,
+            "algorithm": "HMAC-SHA256",
+        },
+        "event_count": len(relevant_events),
+        "events": [ev.model_dump(mode="json") for ev in relevant_events],
+    }
+    return Response(
+        content=json.dumps(result_data, indent=2).encode("utf-8"),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="audit_trail_exp_{experiment_id}.json"'},
     )
 
 
@@ -1619,6 +1779,84 @@ async def list_inventory_custom_fields(
         INVENTORY_CUSTOM_FIELDS,
         organization_id=principal.organization_id,
     )
+
+
+@inventory_router.post(
+    "/inventory/custom-fields/import-elabftw",
+    status_code=201,
+)
+async def import_elabftw_custom_fields(
+    payload: dict[str, Any],
+    client: ServiceClientDep,
+    principal: PrincipalDep,
+) -> dict[str, Any]:
+    if principal.role != "admin":
+        raise HTTPException(status_code=403, detail="Organization admin role required.")
+    raw_fields: dict[str, Any] = payload.get("extra_fields", payload)
+    if not isinstance(raw_fields, dict):
+        raise HTTPException(status_code=400, detail="Invalid eLabFTW schema format. Expected extra_fields dictionary.")
+    existing = await client.get(
+        "notebook", "/inventory/custom-fields", INVENTORY_CUSTOM_FIELDS,
+        organization_id=principal.organization_id,
+    )
+    existing_names = {f.name.casefold() for f in existing}
+    imported: list[str] = []
+    skipped: list[str] = []
+    for key, spec in raw_fields.items():
+        if not isinstance(spec, dict):
+            continue
+        field_name = str(spec.get("title") or spec.get("name") or key).strip()
+        if not field_name:
+            continue
+        if field_name.casefold() in existing_names:
+            skipped.append(field_name)
+            continue
+        raw_type = str(spec.get("type", "text")).lower()
+        if raw_type in ("number", "float", "int", "integer"):
+            field_type = "number"
+        elif raw_type in ("date", "datetime", "time"):
+            field_type = "date"
+        elif raw_type in ("checkbox", "bool", "boolean"):
+            field_type = "boolean"
+        elif raw_type in ("select", "radio", "dropdown", "multiselect"):
+            field_type = "select"
+        else:
+            field_type = "text"
+        options: list[str] = []
+        if field_type == "select":
+            raw_options = spec.get("options") or spec.get("values") or []
+            if isinstance(raw_options, list):
+                for opt in raw_options:
+                    opt_str = str(opt.get("value") if isinstance(opt, dict) else opt).strip()
+                    if opt_str and opt_str not in options:
+                        options.append(opt_str)
+            elif isinstance(raw_options, str):
+                options = [o.strip() for o in raw_options.split(",") if o.strip()]
+            if not options:
+                field_type = "text"
+        required = bool(spec.get("required", False))
+        create_payload = InventoryCustomFieldDefinitionCreate(
+            name=field_name[:120],
+            field_type=field_type,
+            required=required,
+            options=options[:100],
+        )
+        await client.post(
+            "notebook", "/inventory/custom-fields",
+            create_payload.model_dump(mode="json"),
+            INVENTORY_CUSTOM_FIELD,
+            organization_id=principal.organization_id,
+            user_id=principal.user_id,
+            organization_role=principal.role,
+        )
+        existing_names.add(field_name.casefold())
+        imported.append(field_name)
+    return {
+        "imported": imported,
+        "skipped": skipped,
+        "imported_count": len(imported),
+        "skipped_count": len(skipped),
+    }
 
 
 @inventory_router.post(
@@ -2406,6 +2644,74 @@ async def create_equipment_booking(
         f"/equipment/{equipment_id}/bookings",
         payload.model_dump(mode="json"),
         BOOKING,
+        organization_id=principal.organization_id,
+        user_id=principal.user_id,
+        organization_role=principal.role,
+    )
+
+
+@booking_router.post(
+    "/equipment/{equipment_id}/bookings/recurring",
+    response_model=list[EquipmentBookingRead],
+    status_code=201,
+)
+async def create_recurring_equipment_bookings(
+    equipment_id: int,
+    payload: RecurringEquipmentBookingCreate,
+    client: ServiceClientDep,
+    principal: PrincipalDep,
+) -> list[EquipmentBookingRead]:
+    if payload.project_id is not None:
+        await _require_project_access(client, principal, payload.project_id, write=True)
+
+    starts_at = payload.starts_at.astimezone(timezone.utc)
+    ends_at = payload.ends_at.astimezone(timezone.utc)
+    duration = ends_at - starts_at
+    if duration <= timedelta(0) or duration > timedelta(hours=24):
+        raise HTTPException(400, "Booking duration must be between 1 minute and 24 hours.")
+
+    current_start = starts_at
+    unit = payload.recurrence_unit
+    interval = payload.recurrence_interval
+    anchor_day = starts_at.day if unit == "month" else None
+
+    bookings_to_create: list[dict] = []
+    max_count = min(payload.recurrence_count or 50, 50)
+    max_until = datetime.now(timezone.utc) + timedelta(days=90)
+
+    while len(bookings_to_create) < max_count:
+        if payload.recurrence_until is not None and current_start.date() > payload.recurrence_until:
+            break
+        if current_start > max_until:
+            break
+
+        current_end = current_start + duration
+        bookings_to_create.append({
+            "project_id": payload.project_id,
+            "starts_at": current_start.isoformat(),
+            "ends_at": current_end.isoformat(),
+            "purpose": payload.purpose,
+        })
+
+        if unit == "week":
+            current_start = current_start + timedelta(weeks=interval)
+        elif unit == "month":
+            month_index = current_start.year * 12 + current_start.month - 1 + interval
+            year, month_zero_based = divmod(month_index, 12)
+            month = month_zero_based + 1
+            day = min(anchor_day or current_start.day, calendar.monthrange(year, month)[1])
+            current_start = current_start.replace(year=year, month=month, day=day)
+        else:
+            current_start = current_start + timedelta(days=interval)
+
+    if not bookings_to_create:
+        raise HTTPException(400, "No valid occurrences generated within the specified recurrence window.")
+
+    return await client.post(
+        "notebook",
+        f"/equipment/{equipment_id}/bookings/batch",
+        {"bookings": bookings_to_create},
+        BOOKINGS,
         organization_id=principal.organization_id,
         user_id=principal.user_id,
         organization_role=principal.role,

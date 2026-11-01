@@ -32,6 +32,7 @@ from .schemas import (
     PasswordResetRequest,
     TokenResponse,
     UserRead,
+    VerifyPasswordRequest,
 )
 from .security import (
     Principal,
@@ -433,6 +434,15 @@ def create_router(
             organization_id=principal.organization_id,
             role=membership.role,
         )
+
+    @router.post("/verify-password")
+    def verify_password_endpoint(
+        payload: VerifyPasswordRequest,
+        principal: Annotated[Principal, Depends(get_principal)],
+        service: Annotated[IdentityService, Depends(get_service)],
+    ) -> dict[str, bool]:
+        valid = service.verify_user_password(principal.user_id, payload.password)
+        return {"valid": valid}
 
     @router.post("/admin/invitations", status_code=202)
     def create_invitation(
