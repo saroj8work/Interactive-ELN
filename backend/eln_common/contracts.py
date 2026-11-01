@@ -1,6 +1,8 @@
 from datetime import date, datetime, timezone
 from decimal import Decimal
+import re
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -56,6 +58,73 @@ class ExperimentRead(ExperimentCreate):
     status: Literal["in_progress", "completed", "archived"]
     created_at: datetime
     updated_at: datetime
+
+
+class ExperimentApprovalRequest(BaseModel):
+    reviewer_user_ids: list[int] = Field(min_length=1, max_length=10)
+    rejection_reviewer_user_ids: list[int] = Field(default_factory=list, max_length=10)
+    review_mode: Literal["sequential", "parallel"] = "sequential"
+    comment: str = Field(default="", max_length=2000)
+
+    @field_validator("reviewer_user_ids")
+    @classmethod
+    def validate_reviewers(cls, value: list[int]) -> list[int]:
+        if any(reviewer_id <= 0 for reviewer_id in value):
+            raise ValueError("Reviewer IDs must be positive.")
+        if len(set(value)) != len(value):
+            raise ValueError("A reviewer can only appear once in the approval sequence.")
+        return value
+
+    @model_validator(mode="after")
+    def validate_rejection_path(self):
+        if self.rejection_reviewer_user_ids:
+            if self.review_mode != "sequential":
+                raise ValueError("A rejection review path requires sequential review mode.")
+            if any(user_id <= 0 for user_id in self.rejection_reviewer_user_ids):
+                raise ValueError("Reviewer IDs must be positive.")
+            if len(set(self.rejection_reviewer_user_ids)) != len(self.rejection_reviewer_user_ids):
+                raise ValueError("A reviewer can only appear once in the approval paths.")
+            if set(self.reviewer_user_ids) & set(self.rejection_reviewer_user_ids):
+                raise ValueError("A reviewer cannot appear in both approval paths.")
+        return self
+
+
+class ExperimentApprovalDecision(BaseModel):
+    status: Literal["approved", "rejected"]
+    comment: str = Field(default="", max_length=2000)
+
+
+class ExperimentApprovalStepRead(BaseModel):
+    step_order: int
+    branch: Literal["main", "rejection"] = "main"
+    reviewer_user_id: int
+    status: Literal["pending", "approved", "rejected", "stale", "not_required"]
+    comment: str = ""
+    decided_by_user_id: int | None = None
+    decided_at: datetime | None = None
+
+
+class ExperimentApprovalRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    organization_id: int
+    experiment_id: int
+    requested_by_user_id: int
+    reviewer_user_id: int
+    reviewer_user_ids: list[int]
+    rejection_reviewer_user_ids: list[int] = Field(default_factory=list)
+    review_mode: Literal["sequential", "parallel"]
+    active_branch: Literal["main", "rejection"] = "main"
+    current_step_index: int
+    step_history: list[ExperimentApprovalStepRead]
+    status: Literal["pending", "approved", "rejected", "stale"]
+    request_comment: str
+    decision_comment: str
+    snapshot_digest: str
+    decided_by_user_id: int | None
+    requested_at: datetime
+    decided_at: datetime | None
 
 
 class EntryCreate(BaseModel):
@@ -119,6 +188,8 @@ class ProjectImportResult(BaseModel):
     entries_imported: int
     attachments_imported: int
     tasks_imported: int
+    resources_imported: int = 0
+    samples_imported: int = 0
 
 
 class EntryRead(EntryCreate):
@@ -176,6 +247,21 @@ class InventoryItemCreate(BaseModel):
     location: str = Field(default="", max_length=200)
     location_id: int | None = Field(default=None, gt=0)
     notes: str = Field(default="", max_length=5000)
+    custom_fields: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("custom_fields")
+    @classmethod
+    def validate_custom_fields(cls, value: dict[str, str]) -> dict[str, str]:
+        if len(value) > 50:
+            raise ValueError("Inventory supports at most 50 custom fields.")
+        total_chars = 0
+        for name, field_value in value.items():
+            if not name.strip() or len(name) > 120 or len(field_value) > 10_000:
+                raise ValueError("Custom field names and values exceed their limits.")
+            total_chars += len(name) + len(field_value)
+        if total_chars > 100_000:
+            raise ValueError("Custom fields exceed the 100,000 character limit.")
+        return value
 
 
 class InventoryItemRead(InventoryItemCreate):
@@ -185,6 +271,45 @@ class InventoryItemRead(InventoryItemCreate):
     organization_id: int
     created_at: datetime
     updated_at: datetime
+    status: Literal["active", "archived"]
+
+
+class InventoryCustomFieldDefinitionCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    field_type: Literal["text", "number", "date", "boolean", "select"] = "text"
+    required: bool = False
+    options: list[str] = Field(default_factory=list, max_length=100)
+
+    @field_validator("options")
+    @classmethod
+    def validate_options(cls, value: list[str]) -> list[str]:
+        normalized = [option.strip() for option in value]
+        if any(not option or len(option) > 120 for option in normalized):
+            raise ValueError("Select options must be non-empty and at most 120 characters.")
+        if len({option.casefold() for option in normalized}) != len(normalized):
+            raise ValueError("Select options must be unique.")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_select_options(self) -> "InventoryCustomFieldDefinitionCreate":
+        if self.field_type == "select" and not self.options:
+            raise ValueError("Select fields require at least one option.")
+        if self.field_type != "select" and self.options:
+            raise ValueError("Only select fields can have options.")
+        return self
+
+
+class InventoryCustomFieldDefinitionUpdate(InventoryCustomFieldDefinitionCreate):
+    pass
+
+
+class InventoryCustomFieldDefinitionRead(InventoryCustomFieldDefinitionCreate):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    organization_id: int
+    created_by_user_id: int
+    created_at: datetime
     status: Literal["active", "archived"]
 
 
@@ -208,15 +333,71 @@ class StorageLocationRead(StorageLocationCreate):
     created_at: datetime
 
 
+class StorageLocationUpdate(BaseModel):
+    code: str | None = Field(default=None, min_length=1, max_length=80)
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    parent_id: int | None = Field(default=None, gt=0)
+    location_type: Literal[
+        "building", "room", "freezer", "refrigerator", "cabinet", "shelf", "box", "other"
+    ] | None = None
+    description: str | None = Field(default=None, max_length=2000)
+
+
 class WorkflowRuleCreate(BaseModel):
     project_id: int = Field(gt=0)
     name: str = Field(min_length=1, max_length=160)
+    trigger_type: Literal[
+        "experiment_status_changed",
+        "experiment_created",
+        "entry_created",
+        "experiment_approval_ended",
+    ] = "experiment_status_changed"
+    approval_outcome: Literal["approved", "rejected", "stale"] | None = None
     from_status: Literal["in_progress", "completed", "archived"] | None = None
-    to_status: Literal["in_progress", "completed", "archived"]
+    to_status: Literal["in_progress", "completed", "archived"] | None = None
     task_title: str = Field(min_length=1, max_length=200)
     task_description: str = Field(default="", max_length=5000)
     task_priority: Literal["low", "normal", "high", "urgent"] = "normal"
     due_days: int | None = Field(default=None, ge=0, le=3650)
+    assigned_to_user_id: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def validate_trigger_configuration(self) -> "WorkflowRuleCreate":
+        if self.trigger_type == "experiment_status_changed":
+            if self.approval_outcome is not None:
+                raise ValueError("Approval outcomes only apply to approval-ended triggers.")
+            if self.to_status is None:
+                raise ValueError("Choose a destination status for this trigger.")
+            if self.from_status == self.to_status:
+                raise ValueError("Workflow transition statuses must differ.")
+        elif self.trigger_type == "experiment_approval_ended":
+            if self.from_status is not None or self.to_status is not None:
+                raise ValueError("Status conditions only apply to experiment status triggers.")
+        elif self.from_status is not None or self.to_status is not None or self.approval_outcome is not None:
+            raise ValueError("Conditions do not apply to this workflow trigger.")
+        return self
+
+
+class WorkflowRuleUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    trigger_type: Literal[
+        "experiment_status_changed",
+        "experiment_created",
+        "entry_created",
+        "experiment_approval_ended",
+    ] | None = None
+    approval_outcome: Literal["approved", "rejected", "stale"] | None = None
+    from_status: Literal["in_progress", "completed", "archived"] | None = None
+    to_status: Literal["in_progress", "completed", "archived"] | None = None
+    task_title: str | None = Field(default=None, min_length=1, max_length=200)
+    task_description: str | None = Field(default=None, max_length=5000)
+    task_priority: Literal["low", "normal", "high", "urgent"] | None = None
+    due_days: int | None = Field(default=None, ge=0, le=3650)
+    assigned_to_user_id: int | None = Field(default=None, gt=0)
+
+
+class WorkflowRuleEnabledUpdate(BaseModel):
+    enabled: bool
 
 
 class WorkflowRuleRead(WorkflowRuleCreate):
@@ -240,6 +421,25 @@ class EntryTimestampRead(BaseModel):
     record_sha256: str
     tsa_time: datetime
     created_at: datetime
+
+    @field_validator("tsa_time", "created_at", mode="before")
+    @classmethod
+    def assume_utc_for_naive_database_timestamps(cls, value: datetime) -> datetime:
+        if isinstance(value, datetime) and value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
+
+
+class EntryTimestampVerificationRead(BaseModel):
+    timestamp_id: int
+    snapshot_sha256: str
+    recorded_sha256: str
+    digest_matches: bool
+    token_valid_for_snapshot: bool
+    token_time: datetime | None
+    stored_time_matches: bool
+    valid: bool
+    message: str
 
 
 class StockAdjustment(BaseModel):
@@ -273,12 +473,42 @@ class SampleCreate(BaseModel):
     description: str = Field(default="", max_length=5000)
 
 
+class SampleLocationUpdate(BaseModel):
+    storage_location_id: int | None = Field(default=None, gt=0)
+    storage_location: str = Field(default="", max_length=200)
+
+
+class SampleCustodyTransferCreate(BaseModel):
+    to_user_id: int = Field(gt=0)
+    request_note: str = Field(default="", max_length=2000)
+
+
+class SampleCustodyTransferAccept(BaseModel):
+    receipt_note: str = Field(default="", max_length=2000)
+
+
+class SampleCustodyTransferRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    organization_id: int
+    sample_id: int
+    from_user_id: int
+    to_user_id: int
+    status: Literal["pending", "accepted", "cancelled"]
+    request_note: str
+    receipt_note: str
+    requested_at: datetime
+    accepted_at: datetime | None
+
+
 class SampleRead(SampleCreate):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
     organization_id: int
     created_by_user_id: int
+    current_custodian_user_id: int
     created_at: datetime
     status: Literal["active", "archived"]
 
@@ -439,6 +669,10 @@ class EquipmentBookingCreate(BaseModel):
         return self
 
 
+class EquipmentBookingBatchCreate(BaseModel):
+    bookings: list[EquipmentBookingCreate] = Field(min_length=1, max_length=100)
+
+
 class EquipmentBookingRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -461,6 +695,78 @@ class EquipmentBookingRead(BaseModel):
         return value
 
 
+class EquipmentCalendarImportResult(BaseModel):
+    imported_count: int = Field(ge=0)
+
+
+class EquipmentMaintenanceCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    notes: str = Field(default="", max_length=5000)
+    service_provider: str = Field(default="", max_length=200)
+    service_contact_email: str = Field(default="", max_length=320)
+    service_contact_phone: str = Field(default="", max_length=64)
+    recurrence_days: int | None = Field(default=None, ge=1, le=3650)
+    recurrence_unit: Literal["days", "weeks", "months"] | None = None
+    recurrence_until: date | None = None
+    starts_at: datetime
+    ends_at: datetime
+
+    @model_validator(mode="after")
+    def validate_window(self) -> "EquipmentMaintenanceCreate":
+        if self.starts_at.tzinfo is None or self.ends_at.tzinfo is None:
+            raise ValueError("Maintenance timestamps must include a timezone.")
+        if self.ends_at <= self.starts_at:
+            raise ValueError("Maintenance end must be after maintenance start.")
+        if self.recurrence_until is not None:
+            if self.recurrence_days is None:
+                raise ValueError("A recurrence end date requires a recurrence interval.")
+            if self.recurrence_until < self.starts_at.date():
+                raise ValueError("Recurrence end date cannot precede the first maintenance window.")
+        return self
+
+
+class EquipmentMaintenanceStatusUpdate(BaseModel):
+    status: Literal["in_progress", "completed", "cancelled"]
+
+
+class EquipmentMaintenanceUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    notes: str | None = Field(default=None, max_length=5000)
+    service_provider: str | None = Field(default=None, max_length=200)
+    service_contact_email: str | None = Field(default=None, max_length=320)
+    service_contact_phone: str | None = Field(default=None, max_length=64)
+    recurrence_days: int | None = Field(default=None, ge=1, le=3650)
+    recurrence_unit: Literal["days", "weeks", "months"] | None = None
+    recurrence_until: date | None = None
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+
+    @field_validator("starts_at", "ends_at")
+    @classmethod
+    def require_timezone_for_updated_window(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("Maintenance timestamps must include a timezone.")
+        return value
+
+
+class EquipmentMaintenanceRead(EquipmentMaintenanceCreate):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    organization_id: int
+    equipment_id: int
+    created_by_user_id: int
+    status: Literal["scheduled", "in_progress", "completed", "cancelled"]
+    created_at: datetime
+
+    @field_validator("starts_at", "ends_at", "created_at", mode="before")
+    @classmethod
+    def assume_utc_for_naive_timestamps(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
+
+
 class ActivityEventCreate(BaseModel):
     event_id: str = Field(min_length=1, max_length=36)
     source_service: str = Field(min_length=1, max_length=64)
@@ -470,6 +776,89 @@ class ActivityEventCreate(BaseModel):
     organization_id: int
     occurred_at: datetime
     details: dict[str, str] = Field(default_factory=dict)
+
+
+class WebhookEndpointCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    url: str = Field(min_length=1, max_length=2048)
+    event_types: list[str] = Field(min_length=1, max_length=50)
+
+    @field_validator("url")
+    @classmethod
+    def require_https_url_without_embedded_credentials(cls, value: str) -> str:
+        parsed = urlsplit(value.strip())
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("Webhook URL must be HTTPS and cannot contain credentials, query parameters, or a fragment.")
+        return value.strip()
+
+    @field_validator("event_types")
+    @classmethod
+    def validate_webhook_event_types(cls, value: list[str]) -> list[str]:
+        normalized = list(dict.fromkeys(item.strip().casefold() for item in value))
+        if "*" in normalized and len(normalized) != 1:
+            raise ValueError("The wildcard event type cannot be combined with specific event types.")
+        if any(
+            item != "*"
+            and not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}\.[a-z][a-z0-9_-]{0,47}", item)
+            for item in normalized
+        ):
+            raise ValueError("Event types must use source.action names, such as notebook.created.")
+        return normalized
+
+
+class WebhookEndpointUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    url: str | None = Field(default=None, min_length=1, max_length=2048)
+    event_types: list[str] | None = Field(default=None, min_length=1, max_length=50)
+    enabled: bool | None = None
+
+    @field_validator("url")
+    @classmethod
+    def validate_optional_https_url(cls, value: str | None) -> str | None:
+        return WebhookEndpointCreate.require_https_url_without_embedded_credentials(value) if value is not None else None
+
+    @field_validator("event_types")
+    @classmethod
+    def validate_optional_event_types(cls, value: list[str] | None) -> list[str] | None:
+        return WebhookEndpointCreate.validate_webhook_event_types(value) if value is not None else None
+
+
+class WebhookEndpointRead(BaseModel):
+    id: int
+    name: str
+    url: str
+    event_types: list[str]
+    secret_prefix: str
+    enabled: bool
+    created_at: datetime
+    revoked_at: datetime | None
+
+
+class WebhookEndpointCreated(WebhookEndpointRead):
+    secret: str
+
+
+class WebhookDeliveryRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    event_id: str
+    event_type: str
+    attempts: int
+    next_attempt_at: datetime | None
+    last_attempt_at: datetime | None
+    last_status_code: int | None
+    last_error: str | None
+    delivered_at: datetime | None
+    failed_at: datetime | None
+    created_at: datetime
 
 
 class ActivityEventRead(BaseModel):
@@ -484,3 +873,19 @@ class ActivityEventRead(BaseModel):
     organization_id: int
     occurred_at: datetime
     details: dict[str, str]
+
+
+class NotificationRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    organization_id: int
+    user_id: int
+    event_id: str
+    title: str
+    message: str
+    entity_type: str
+    entity_id: int
+    details: dict[str, str]
+    created_at: datetime
+    read_at: datetime | None

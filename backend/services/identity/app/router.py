@@ -1,5 +1,6 @@
 import hmac
 import os
+from datetime import datetime, timezone
 from urllib.parse import urlsplit
 from typing import Annotated
 
@@ -9,9 +10,18 @@ from sqlalchemy.orm import Session
 from eln_common.database import Database
 from eln_common.errors import InvalidInputError
 
-from .models import Membership, User
+from .models import ApiCredential, CalendarFeed, Membership, Organization, User
 from .repository import IdentityRepository
 from .schemas import (
+    ApiCredentialCreate,
+    ApiCredentialCreated,
+    ApiCredentialPrincipal,
+    ApiCredentialRead,
+    CalendarFeedAuthenticate,
+    CalendarFeedCreated,
+    CalendarFeedCreate,
+    CalendarFeedPrincipal,
+    CalendarFeedRead,
     CurrentUserRead,
     InvitationAccept,
     InvitationCreate,
@@ -23,7 +33,13 @@ from .schemas import (
     TokenResponse,
     UserRead,
 )
-from .security import Principal, get_principal, require_admin
+from .security import (
+    Principal,
+    get_principal,
+    opaque_token,
+    require_admin,
+    token_digest,
+)
 from .service import IdentityService, InvitationSender
 
 
@@ -32,8 +48,260 @@ def create_router(
 ) -> APIRouter:
     router = APIRouter(prefix="/auth", tags=["identity"])
 
-    def get_service(db: Annotated[Session, Depends(database.dependency)]) -> IdentityService:
+    def get_service(
+        db: Annotated[Session, Depends(database.dependency)],
+    ) -> IdentityService:
         return IdentityService(IdentityRepository(db), db, mailer=mailer)
+
+    def credential_read(credential: ApiCredential) -> ApiCredentialRead:
+        return ApiCredentialRead(
+            id=credential.id,
+            name=credential.name,
+            token_prefix=credential.token_prefix,
+            scopes=credential.scopes.split(","),
+            created_at=credential.created_at,
+            last_used_at=credential.last_used_at,
+            revoked_at=credential.revoked_at,
+        )
+
+    def calendar_feed_read(feed: CalendarFeed) -> CalendarFeedRead:
+        return CalendarFeedRead(
+            id=feed.id,
+            name=feed.name,
+            token_prefix=feed.token_prefix,
+            created_at=feed.created_at,
+            last_used_at=feed.last_used_at,
+            revoked_at=feed.revoked_at,
+        )
+
+    @router.post("/calendar-feeds", response_model=CalendarFeedCreated, status_code=201)
+    def create_calendar_feed(
+        payload: CalendarFeedCreate,
+        principal: Annotated[Principal, Depends(get_principal)],
+        db: Annotated[Session, Depends(database.dependency)],
+    ) -> CalendarFeedCreated:
+        name = payload.name.strip()
+        if not name:
+            raise InvalidInputError("Calendar feed name cannot be blank.")
+        secret = f"eln_calendar_{opaque_token()}"
+        feed = CalendarFeed(
+            organization_id=principal.organization_id,
+            user_id=principal.user_id,
+            name=name,
+            token_hash=token_digest(secret),
+            token_prefix=secret[:24],
+        )
+        db.add(feed)
+        db.commit()
+        db.refresh(feed)
+        return CalendarFeedCreated(**calendar_feed_read(feed).model_dump(), secret=secret)
+
+    @router.get("/calendar-feeds", response_model=list[CalendarFeedRead])
+    def list_calendar_feeds(
+        principal: Annotated[Principal, Depends(get_principal)],
+        db: Annotated[Session, Depends(database.dependency)],
+    ) -> list[CalendarFeedRead]:
+        records = (
+            db.query(CalendarFeed)
+            .filter(CalendarFeed.organization_id == principal.organization_id, CalendarFeed.user_id == principal.user_id)
+            .order_by(CalendarFeed.id.desc())
+            .all()
+        )
+        return [calendar_feed_read(feed) for feed in records]
+
+    @router.delete("/calendar-feeds/{feed_id}", status_code=204)
+    def revoke_calendar_feed(
+        feed_id: int,
+        principal: Annotated[Principal, Depends(get_principal)],
+        db: Annotated[Session, Depends(database.dependency)],
+    ) -> Response:
+        feed = db.query(CalendarFeed).filter(
+            CalendarFeed.id == feed_id,
+            CalendarFeed.organization_id == principal.organization_id,
+            CalendarFeed.user_id == principal.user_id,
+        ).one_or_none()
+        if feed is None:
+            raise HTTPException(status_code=404, detail="Calendar feed not found.")
+        if feed.revoked_at is None:
+            feed.revoked_at = datetime.now(timezone.utc)
+            db.commit()
+        return Response(status_code=204)
+
+    @router.post("/calendar-feeds/authenticate", response_model=CalendarFeedPrincipal)
+    def authenticate_calendar_feed(
+        payload: CalendarFeedAuthenticate,
+        db: Annotated[Session, Depends(database.dependency)],
+    ) -> CalendarFeedPrincipal:
+        feed = db.query(CalendarFeed).filter(
+            CalendarFeed.id == payload.feed_id,
+            CalendarFeed.token_hash == token_digest(payload.secret),
+            CalendarFeed.token_prefix == payload.secret[:24],
+            CalendarFeed.revoked_at.is_(None),
+        ).one_or_none()
+        if feed is None:
+            raise HTTPException(status_code=401, detail="Calendar feed is invalid or revoked.")
+        user = db.get(User, feed.user_id)
+        organization = db.get(Organization, feed.organization_id)
+        membership = db.query(Membership).filter(
+            Membership.user_id == feed.user_id,
+            Membership.organization_id == feed.organization_id,
+            Membership.is_active.is_(True),
+        ).one_or_none()
+        if user is None or not user.is_active or user.email_verified_at is None or organization is None or not organization.is_active or membership is None:
+            raise HTTPException(status_code=401, detail="Calendar feed is invalid or revoked.")
+        feed.last_used_at = datetime.now(timezone.utc)
+        db.commit()
+        return CalendarFeedPrincipal(feed_id=feed.id, user_id=feed.user_id, organization_id=feed.organization_id)
+
+    @router.post("/api-credentials", response_model=ApiCredentialCreated, status_code=201)
+    def create_api_credential(
+        payload: ApiCredentialCreate,
+        principal: Annotated[Principal, Depends(get_principal)],
+        db: Annotated[Session, Depends(database.dependency)],
+    ) -> ApiCredentialCreated:
+        scopes = sorted(set(payload.scopes))
+        if not scopes or len(scopes) != len(payload.scopes):
+            raise InvalidInputError("Credential scopes must be unique.")
+        name = payload.name.strip()
+        if not name:
+            raise InvalidInputError("Credential name cannot be blank.")
+        secret = f"eln_live_{opaque_token()}"
+        credential = ApiCredential(
+            organization_id=principal.organization_id,
+            user_id=principal.user_id,
+            name=name,
+            token_hash=token_digest(secret),
+            token_prefix=secret[:16],
+            scopes=",".join(scopes),
+        )
+        db.add(credential)
+        db.commit()
+        db.refresh(credential)
+        return ApiCredentialCreated(
+            **credential_read(credential).model_dump(), secret=secret
+        )
+
+    @router.get("/api-credentials", response_model=list[ApiCredentialRead])
+    def list_api_credentials(
+        principal: Annotated[Principal, Depends(get_principal)],
+        db: Annotated[Session, Depends(database.dependency)],
+    ) -> list[ApiCredentialRead]:
+        records = (
+            db.query(ApiCredential)
+            .filter(
+                ApiCredential.organization_id == principal.organization_id,
+                ApiCredential.user_id == principal.user_id,
+            )
+            .order_by(ApiCredential.id.desc())
+            .all()
+        )
+        return [credential_read(record) for record in records]
+
+    @router.delete("/api-credentials/{credential_id}", status_code=204)
+    def revoke_api_credential(
+        credential_id: int,
+        principal: Annotated[Principal, Depends(get_principal)],
+        db: Annotated[Session, Depends(database.dependency)],
+    ) -> Response:
+        credential = (
+            db.query(ApiCredential)
+            .filter(
+                ApiCredential.id == credential_id,
+                ApiCredential.organization_id == principal.organization_id,
+                ApiCredential.user_id == principal.user_id,
+            )
+            .one_or_none()
+        )
+        if credential is None:
+            raise HTTPException(status_code=404, detail="API credential not found.")
+        if not credential.is_revoked:
+            credential.is_revoked = True
+            credential.revoked_at = datetime.now(timezone.utc)
+            db.commit()
+        return Response(status_code=204)
+
+    @router.post(
+        "/api-credentials/{credential_id}/rotate",
+        response_model=ApiCredentialCreated,
+    )
+    def rotate_api_credential(
+        credential_id: int,
+        principal: Annotated[Principal, Depends(get_principal)],
+        db: Annotated[Session, Depends(database.dependency)],
+    ) -> ApiCredentialCreated:
+        credential = (
+            db.query(ApiCredential)
+            .filter(
+                ApiCredential.id == credential_id,
+                ApiCredential.organization_id == principal.organization_id,
+                ApiCredential.user_id == principal.user_id,
+                ApiCredential.is_revoked.is_(False),
+            )
+            .one_or_none()
+        )
+        if credential is None:
+            raise HTTPException(status_code=404, detail="Active API credential not found.")
+        secret = f"eln_live_{opaque_token()}"
+        credential.token_hash = token_digest(secret)
+        credential.token_prefix = secret[:16]
+        credential.last_used_at = None
+        db.commit()
+        db.refresh(credential)
+        return ApiCredentialCreated(
+            **credential_read(credential).model_dump(), secret=secret
+        )
+
+    @router.post("/api-credentials/authenticate", response_model=ApiCredentialPrincipal)
+    def authenticate_api_credential(
+        authorization: Annotated[str | None, Header()] = None,
+        db: Session = Depends(database.dependency),
+    ) -> ApiCredentialPrincipal:
+        scheme, separator, secret = (authorization or "").partition(" ")
+        if (
+            not separator
+            or scheme.lower() != "bearer"
+            or not secret.startswith("eln_live_")
+        ):
+            raise HTTPException(status_code=401, detail="Invalid API credential.")
+        credential = (
+            db.query(ApiCredential)
+            .filter(
+                ApiCredential.token_hash == token_digest(secret),
+                ApiCredential.token_prefix == secret[:16],
+                ApiCredential.is_revoked.is_(False),
+            )
+            .one_or_none()
+        )
+        if credential is None:
+            raise HTTPException(status_code=401, detail="Invalid API credential.")
+        user = db.get(User, credential.user_id)
+        organization = db.get(Organization, credential.organization_id)
+        membership = (
+            db.query(Membership)
+            .filter(
+                Membership.user_id == credential.user_id,
+                Membership.organization_id == credential.organization_id,
+            )
+            .one_or_none()
+        )
+        if (
+            user is None
+            or not user.is_active
+            or user.email_verified_at is None
+            or organization is None
+            or not organization.is_active
+            or membership is None
+            or not membership.is_active
+        ):
+            raise HTTPException(status_code=401, detail="Invalid API credential.")
+        credential.last_used_at = datetime.now(timezone.utc)
+        db.commit()
+        return ApiCredentialPrincipal(
+            user_id=user.id,
+            organization_id=organization.id,
+            role=membership.role,
+            scopes=credential.scopes.split(","),
+        )
 
     @router.post("/bootstrap/organizations", response_model=OrganizationRead, status_code=201)
     def bootstrap_organization(

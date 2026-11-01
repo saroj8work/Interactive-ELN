@@ -1,22 +1,36 @@
 import type {
   ActivityEvent,
+  Notification,
   AuditVerification,
   EntryAttachment,
   EntryRevision,
+  EntryTimestamp,
+  EntryTimestampVerification,
   LabTask,
   RecordTagSet,
   RecordSignature,
   EquipmentBooking,
+  EquipmentMaintenance,
+  CalendarFeed,
+  CalendarFeedCreated,
   EquipmentResource,
   Experiment,
+  ExperimentApproval,
   InventoryItem,
+  InventoryCustomFieldDefinition,
   NotebookTemplate,
   NotebookEntry,
   Project,
   ProjectAccess,
   ProjectMember,
   SampleRecord,
+  SampleCustodyTransfer,
   SearchHit,
+  StorageLocation,
+  WorkflowRule,
+  WebhookDelivery,
+  WebhookEndpoint,
+  WebhookEndpointCreated,
 } from "./types";
 
 let accessToken: string | null = null;
@@ -32,7 +46,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
   if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
   let response = await fetch(path, { ...init, headers });
-  if (response.status === 401 && accessToken && !path.startsWith("/auth/")) {
+  const unauthenticatedAuthPaths = [
+    "/auth/login", "/auth/refresh", "/auth/logout", "/auth/password-reset/request",
+    "/auth/password-reset/complete", "/auth/invitations/accept",
+  ];
+  if (response.status === 401 && accessToken && !unauthenticatedAuthPaths.includes(path.split("?")[0])) {
     const refreshed = await fetch("/auth/refresh", {
       method: "POST",
       credentials: "same-origin",
@@ -83,11 +101,40 @@ export const api = {
     unit: string;
     low_stock_threshold: number;
     location: string;
+    location_id?: number | null;
     notes: string;
+    custom_fields: Record<string, string>;
   }) =>
     request<InventoryItem>("/api/inventory", {
       method: "POST",
       body: JSON.stringify(payload),
+    }),
+  inventoryCustomFields: () =>
+    request<InventoryCustomFieldDefinition[]>("/api/inventory/custom-fields"),
+  createInventoryCustomField: (payload: {
+    name: string;
+    field_type: InventoryCustomFieldDefinition["field_type"];
+    required: boolean;
+    options: string[];
+  }) =>
+    request<InventoryCustomFieldDefinition>("/api/inventory/custom-fields", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateInventoryCustomField: (fieldId: number, payload: {
+    name: string;
+    field_type: InventoryCustomFieldDefinition["field_type"];
+    required: boolean;
+    options: string[];
+  }) =>
+    request<InventoryCustomFieldDefinition>(`/api/inventory/custom-fields/${fieldId}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
+  setInventoryCustomFieldStatus: (fieldId: number, status: InventoryCustomFieldDefinition["status"]) =>
+    request<InventoryCustomFieldDefinition>(`/api/inventory/custom-fields/${fieldId}/status`, {
+      method: "POST",
+      body: JSON.stringify({ status }),
     }),
   adjustStock: (itemId: number, quantityDelta: number, reason: string) =>
     request(`/api/inventory/${itemId}/adjustments`, {
@@ -95,6 +142,8 @@ export const api = {
       body: JSON.stringify({ quantity_delta: quantityDelta, reason }),
     }),
   samples: () => request<SampleRecord[]>("/api/samples"),
+  pendingSampleCustodyTransfers: () =>
+    request<SampleCustodyTransfer[]>("/api/sample-custody-transfers/pending"),
   createSample: (payload: {
     name: string;
     sample_type: string;
@@ -102,11 +151,36 @@ export const api = {
     project_id: number | null;
     parent_sample_id: number | null;
     storage_location: string;
+    storage_location_id?: number | null;
     description: string;
   }) =>
     request<SampleRecord>("/api/samples", {
       method: "POST",
       body: JSON.stringify(payload),
+    }),
+  moveSample: (sampleId: number, payload: { storage_location_id: number | null; storage_location: string }) =>
+    request<SampleRecord>(`/api/samples/${sampleId}/location`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  sampleLocationHistory: (sampleId: number) =>
+    request<ActivityEvent[]>(`/api/samples/${sampleId}/history`),
+  sampleCustodyTransfers: (sampleId: number) =>
+    request<SampleCustodyTransfer[]>(`/api/samples/${sampleId}/custody-transfers`),
+  requestSampleCustodyTransfer: (sampleId: number, toUserId: number, requestNote: string) =>
+    request<SampleCustodyTransfer>(`/api/samples/${sampleId}/custody-transfers`, {
+      method: "POST",
+      body: JSON.stringify({ to_user_id: toUserId, request_note: requestNote }),
+    }),
+  acceptSampleCustodyTransfer: (sampleId: number, transferId: number, receiptNote: string) =>
+    request<SampleCustodyTransfer>(`/api/samples/${sampleId}/custody-transfers/${transferId}/accept`, {
+      method: "POST",
+      body: JSON.stringify({ receipt_note: receiptNote }),
+    }),
+  cancelSampleCustodyTransfer: (sampleId: number, transferId: number) =>
+    request<SampleCustodyTransfer>(`/api/samples/${sampleId}/custody-transfers/${transferId}/cancel`, {
+      method: "POST",
+      body: JSON.stringify({}),
     }),
   attachments: (entryId: number) =>
     request<EntryAttachment[]>(`/api/entries/${entryId}/attachments`),
@@ -154,15 +228,18 @@ export const api = {
     link.click();
     URL.revokeObjectURL(url);
   },
-  importProject: (projectId: number, file: File) => {
+  importProject: (projectId: number, file: File, entityType: "experiments" | "resources" | "samples" = "experiments") => {
     const body = new FormData();
     body.set("file", file);
+    body.set("entity_type", entityType);
     return request<{
       project_id: number;
       experiments_imported: number;
       entries_imported: number;
       attachments_imported: number;
       tasks_imported: number;
+      resources_imported: number;
+      samples_imported: number;
     }>(`/api/projects/${projectId}/import`, { method: "POST", body });
   },
   updateResourceStatus: (
@@ -203,6 +280,18 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ status }),
     }),
+  experimentApprovals: (experimentId: number) =>
+    request<ExperimentApproval[]>(`/api/experiments/${experimentId}/approvals`),
+  requestExperimentApproval: (experimentId: number, reviewerUserIds: number[], comment: string, reviewMode: ExperimentApproval["review_mode"], rejectionReviewerUserIds: number[] = []) =>
+    request<ExperimentApproval>(`/api/experiments/${experimentId}/approvals`, {
+      method: "POST",
+      body: JSON.stringify({ reviewer_user_ids: reviewerUserIds, rejection_reviewer_user_ids: rejectionReviewerUserIds, review_mode: reviewMode, comment }),
+    }),
+  decideExperimentApproval: (approvalId: number, status: "approved" | "rejected", comment: string) =>
+    request<ExperimentApproval>(`/api/experiment-approvals/${approvalId}/decision`, {
+      method: "POST",
+      body: JSON.stringify({ status, comment }),
+    }),
   createExperiment: (projectId: number, name: string, description: string) =>
     request<Experiment>(`/api/projects/${projectId}/experiments`, {
       method: "POST",
@@ -242,6 +331,12 @@ export const api = {
       body: JSON.stringify({ entity_type: entityType, tags }),
     }),
   activity: () => request<ActivityEvent[]>("/api/activity"),
+  notifications: () => request<Notification[]>("/api/notifications"),
+  markNotificationRead: (notificationId: number) =>
+    request<Notification>(`/api/notifications/${notificationId}/read`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
   search: (query: string) =>
     request<SearchHit[]>(`/api/search?query=${encodeURIComponent(query)}`),
   tasks: (projectId: number) =>
@@ -274,7 +369,13 @@ export const api = {
     }),
   verifyAuditChain: () => request<AuditVerification>("/api/audit/verify"),
   equipment: () => request<EquipmentResource[]>("/api/equipment"),
-  createEquipment: (payload: { name: string; description: string; location: string; category: string }) =>
+  createEquipment: (payload: {
+    name: string;
+    description: string;
+    location: string;
+    storage_location_id?: number | null;
+    category: string;
+  }) =>
     request<EquipmentResource>("/api/equipment", {
       method: "POST",
       body: JSON.stringify(payload),
@@ -292,6 +393,128 @@ export const api = {
     request<EquipmentBooking>(`/api/equipment/bookings/${bookingId}/cancel`, {
       method: "POST",
     }),
+  importEquipmentCalendar: (equipmentId: number, file: File, timezoneName: string, projectId: number | null) => {
+    const body = new FormData();
+    body.set("file", file);
+    body.set("timezone_name", timezoneName);
+    if (projectId !== null) body.set("project_id", String(projectId));
+    return request<{ imported_count: number }>(`/api/equipment/${equipmentId}/bookings/import-ics`, {
+      method: "POST",
+      body,
+    });
+  },
+  equipmentMaintenance: () => request<EquipmentMaintenance[]>("/api/equipment/maintenance"),
+  calendarFeeds: () => request<CalendarFeed[]>("/auth/calendar-feeds"),
+  createCalendarFeed: (name: string) => request<CalendarFeedCreated>("/auth/calendar-feeds", {
+    method: "POST", body: JSON.stringify({ name }),
+  }),
+  revokeCalendarFeed: (feedId: number) => request<void>(`/auth/calendar-feeds/${feedId}`, { method: "DELETE" }),
+  webhookEndpoints: () => request<WebhookEndpoint[]>("/api/integrations/webhooks"),
+  createWebhookEndpoint: (payload: { name: string; url: string; event_types: string[] }) =>
+    request<WebhookEndpointCreated>("/api/integrations/webhooks", { method: "POST", body: JSON.stringify(payload) }),
+  updateWebhookEndpoint: (id: number, payload: Partial<Pick<WebhookEndpoint, "name" | "url" | "event_types" | "enabled">>) =>
+    request<WebhookEndpoint>(`/api/integrations/webhooks/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  rotateWebhookSecret: (id: number) =>
+    request<WebhookEndpointCreated>(`/api/integrations/webhooks/${id}/rotate-secret`, { method: "POST", body: "{}" }),
+  webhookDeliveries: (id: number) => request<WebhookDelivery[]>(`/api/integrations/webhooks/${id}/deliveries`),
+  revokeWebhookEndpoint: (id: number) => request<void>(`/api/integrations/webhooks/${id}`, { method: "DELETE" }),
+  createEquipmentMaintenance: (equipmentId: number, payload: {
+    title: string; notes: string; service_provider: string; service_contact_email: string; service_contact_phone: string; recurrence_days: number | null; recurrence_unit: EquipmentMaintenance["recurrence_unit"]; recurrence_until: string | null; starts_at: string; ends_at: string;
+  }) => request<EquipmentMaintenance>(`/api/equipment/${equipmentId}/maintenance`, {
+    method: "POST", body: JSON.stringify(payload),
+  }),
+  updateEquipmentMaintenance: (maintenanceId: number, payload: Partial<Omit<EquipmentMaintenance, "id" | "organization_id" | "equipment_id" | "created_by_user_id" | "status" | "created_at">>) =>
+    request<EquipmentMaintenance>(`/api/equipment/maintenance/${maintenanceId}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  updateEquipmentMaintenanceStatus: (maintenanceId: number, status: EquipmentMaintenance["status"]) =>
+    request<EquipmentMaintenance>(`/api/equipment/maintenance/${maintenanceId}/status`, {
+      method: "PATCH", body: JSON.stringify({ status }),
+    }),
+  storageLocations: (includeArchived = false) =>
+    request<StorageLocation[]>(includeArchived ? "/api/storage-locations/all" : "/api/storage-locations"),
+  createStorageLocation: (payload: {
+    code: string;
+    name: string;
+    location_type: StorageLocation["location_type"];
+    parent_id: number | null;
+    description: string;
+  }) =>
+    request<StorageLocation>("/api/storage-locations", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateStorageLocation: (id: number, payload: Partial<Pick<StorageLocation, "code" | "name" | "location_type" | "parent_id" | "description">>) =>
+    request<StorageLocation>(`/api/storage-locations/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  setStorageLocationStatus: (id: number, status: StorageLocation["status"]) =>
+    request<StorageLocation>(`/api/storage-locations/${id}/status`, {
+      method: "POST",
+      body: JSON.stringify({ status }),
+    }),
+  workflowRules: (projectId: number) =>
+    request<WorkflowRule[]>(`/api/projects/${projectId}/workflow-rules`),
+  createWorkflowRule: (
+    projectId: number,
+    payload: {
+      name: string;
+      trigger_type: WorkflowRule["trigger_type"];
+      approval_outcome: WorkflowRule["approval_outcome"];
+      from_status: WorkflowRule["from_status"];
+      to_status: WorkflowRule["to_status"];
+      task_title: string;
+      task_description: string;
+      task_priority: WorkflowRule["task_priority"];
+      due_days: number | null;
+      assigned_to_user_id: number | null;
+    },
+  ) =>
+    request<WorkflowRule>(`/api/projects/${projectId}/workflow-rules`, {
+      method: "POST",
+      body: JSON.stringify({ ...payload, project_id: projectId }),
+    }),
+  updateWorkflowRule: (
+    projectId: number,
+    ruleId: number,
+    payload: {
+      name: string;
+      trigger_type: WorkflowRule["trigger_type"];
+      approval_outcome: WorkflowRule["approval_outcome"];
+      from_status: WorkflowRule["from_status"];
+      to_status: WorkflowRule["to_status"];
+      task_title: string;
+      task_description: string;
+      task_priority: WorkflowRule["task_priority"];
+      due_days: number | null;
+      assigned_to_user_id: number | null;
+    },
+  ) => request<WorkflowRule>(`/api/projects/${projectId}/workflow-rules/${ruleId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  }),
+  setWorkflowRuleEnabled: (projectId: number, ruleId: number, enabled: boolean) =>
+    request<WorkflowRule>(`/api/projects/${projectId}/workflow-rules/${ruleId}/enabled`, {
+      method: "PATCH",
+      body: JSON.stringify({ enabled }),
+    }),
+  entryTimestamps: (entryId: number) =>
+    request<EntryTimestamp[]>(`/api/entries/${entryId}/timestamps`),
+  verifyEntryTimestamp: (entryId: number, timestampId: number) =>
+    request<EntryTimestampVerification>(`/api/entries/${entryId}/timestamps/${timestampId}/verify`),
+  createEntryTimestamp: (entryId: number) =>
+    request<EntryTimestamp>(`/api/entries/${entryId}/timestamps`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+  downloadTimestampProof: async (entryId: number, timestampId: number) => {
+    const blob = await requestBlob(`/api/entries/${entryId}/timestamps/${timestampId}/proof`);
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `entry-${entryId}-timestamp-${timestampId}.zip`;
+    link.click();
+    URL.revokeObjectURL(url);
+  },
 };
 
 async function requestBlob(path: string): Promise<Blob> {

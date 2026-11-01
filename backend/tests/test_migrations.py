@@ -12,9 +12,25 @@ from eln_common.database import Database
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 SERVICE_TABLES = {
-    "identity": {"organizations", "users", "memberships", "password_resets"},
+    "identity": {
+        "organizations",
+        "users",
+        "memberships",
+        "password_resets",
+        "api_credentials",
+    },
     "projects": {"projects", "project_memberships", "outbox_events"},
-    "notebook": {"experiments", "notebook_entries", "lab_tasks", "audit_events"},
+    "notebook": {
+        "experiments",
+        "notebook_entries",
+        "lab_tasks",
+        "audit_events",
+        "storage_locations",
+        "workflow_rules",
+        "workflow_executions",
+        "entry_timestamps",
+        "equipment_maintenance",
+    },
     "activity": {"activity_events"},
 }
 DATABASE_URL_VARIABLES = {
@@ -22,6 +38,18 @@ DATABASE_URL_VARIABLES = {
     "projects": "PROJECTS_DATABASE_URL",
     "notebook": "NOTEBOOK_DATABASE_URL",
     "activity": "ACTIVITY_DATABASE_URL",
+}
+SEARCH_INDEXES = {
+    "projects": {"ix_projects_search_document"},
+    "notebook": {
+        "ix_experiments_search_document",
+        "ix_notebook_entries_search_document",
+        "ix_inventory_items_search_document",
+        "ix_samples_search_document",
+        "ix_equipment_resources_search_document",
+        "ix_notebook_templates_search_document",
+        "ix_record_tags_search_document",
+    },
 }
 
 
@@ -45,6 +73,16 @@ def test_service_migrations_render_postgresql_ddl(
     assert "CREATE TABLE alembic_version" in migration_sql
     for table in expected_tables:
         assert f"CREATE TABLE {table}" in migration_sql
+    if service in SEARCH_INDEXES:
+        assert "USING GIN" in migration_sql
+        ddl_snapshot = (BACKEND_ROOT / "postgresql_ddl.sql").read_text(encoding="utf-8")
+        for index_name in SEARCH_INDEXES[service]:
+            assert index_name in migration_sql
+            assert index_name in ddl_snapshot
+    if service == "notebook":
+        ddl_snapshot = (BACKEND_ROOT / "postgresql_ddl.sql").read_text(encoding="utf-8")
+        assert "storage_location_id INTEGER" in ddl_snapshot
+        assert "CREATE TABLE equipment_maintenance" in ddl_snapshot
 
 
 @pytest.mark.parametrize(

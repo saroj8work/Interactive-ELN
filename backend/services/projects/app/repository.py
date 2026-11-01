@@ -1,4 +1,4 @@
-from sqlalchemy import select
+from sqlalchemy import func, literal_column, or_, select
 from sqlalchemy.orm import Session
 
 from .models import Project, ProjectMembership
@@ -21,6 +21,41 @@ class ProjectRepository:
         return list(
             self._db.scalars(
                 statement.order_by(Project.created_at.desc())
+            )
+        )
+
+    def search_accessible(
+        self, organization_id: int, user_id: int, is_admin: bool, query: str
+    ) -> list[Project]:
+        statement = select(Project).where(Project.organization_id == organization_id)
+        if not is_admin:
+            statement = statement.join(
+                ProjectMembership,
+                (ProjectMembership.project_id == Project.id)
+                & (ProjectMembership.organization_id == Project.organization_id),
+            ).where(ProjectMembership.user_id == user_id)
+        if self._db.get_bind().dialect.name == "postgresql":
+            document = (
+                func.coalesce(Project.name, literal_column("''"))
+                .op("||")(literal_column("' '"))
+                .op("||")(func.coalesce(Project.description, literal_column("''")))
+            )
+            matches = func.to_tsvector(
+                literal_column("'simple'::regconfig"), document
+            ).op("@@")(
+                func.plainto_tsquery(literal_column("'simple'::regconfig"), query)
+            )
+        else:
+            pattern = "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            matches = or_(
+                Project.name.ilike(pattern, escape="\\"),
+                Project.description.ilike(pattern, escape="\\"),
+            )
+        return list(
+            self._db.scalars(
+                statement.where(matches)
+                .order_by(Project.created_at.desc())
+                .limit(100)
             )
         )
 

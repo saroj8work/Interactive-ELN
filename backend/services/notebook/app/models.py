@@ -3,12 +3,15 @@ from decimal import Decimal
 
 from sqlalchemy import (
     JSON,
+    Date,
     DateTime,
     ForeignKey,
+    Index,
     Numeric,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -46,6 +49,39 @@ class NotebookEntry(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
     )
+
+
+class ExperimentApproval(Base):
+    __tablename__ = "experiment_approvals"
+    __table_args__ = (
+        Index(
+            "uq_experiment_approvals_pending",
+            "organization_id",
+            "experiment_id",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+            sqlite_where=text("status = 'pending'"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(index=True)
+    experiment_id: Mapped[int] = mapped_column(ForeignKey("experiments.id"), index=True)
+    requested_by_user_id: Mapped[int] = mapped_column(index=True)
+    reviewer_user_id: Mapped[int] = mapped_column(index=True)
+    reviewer_user_ids: Mapped[list[int]] = mapped_column(JSON, default=list)
+    rejection_reviewer_user_ids: Mapped[list[int]] = mapped_column(JSON, default=list)
+    review_mode: Mapped[str] = mapped_column(String(16), default="sequential")
+    active_branch: Mapped[str] = mapped_column(String(16), default="main")
+    current_step_index: Mapped[int] = mapped_column(default=0)
+    step_history: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    request_comment: Mapped[str] = mapped_column(Text, default="")
+    decision_comment: Mapped[str] = mapped_column(Text, default="")
+    snapshot_digest: Mapped[str] = mapped_column(String(64))
+    decided_by_user_id: Mapped[int | None] = mapped_column()
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class RecordTag(Base):
@@ -130,11 +166,29 @@ class InventoryItem(Base):
     location_id: Mapped[int | None] = mapped_column(ForeignKey("storage_locations.id"), index=True)
     location: Mapped[str] = mapped_column(String(200), default="")
     notes: Mapped[str] = mapped_column(Text, default="")
+    custom_fields: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
     status: Mapped[str] = mapped_column(String(24), default="active", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
     )
+
+
+class InventoryCustomFieldDefinition(Base):
+    __tablename__ = "inventory_custom_field_definitions"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "name"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    field_type: Mapped[str] = mapped_column(String(16), default="text")
+    required: Mapped[bool] = mapped_column(default=False)
+    options: Mapped[list[str]] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(24), default="active", index=True)
+    created_by_user_id: Mapped[int] = mapped_column()
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
 class StockMovement(Base):
@@ -167,7 +221,33 @@ class Sample(Base):
     description: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(24), default="active", index=True)
     created_by_user_id: Mapped[int] = mapped_column()
+    current_custodian_user_id: Mapped[int] = mapped_column(index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class SampleCustodyTransfer(Base):
+    __tablename__ = "sample_custody_transfers"
+    __table_args__ = (
+        Index(
+            "uq_sample_custody_transfers_pending",
+            "organization_id",
+            "sample_id",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+            sqlite_where=text("status = 'pending'"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(index=True)
+    sample_id: Mapped[int] = mapped_column(ForeignKey("samples.id"), index=True)
+    from_user_id: Mapped[int] = mapped_column(index=True)
+    to_user_id: Mapped[int] = mapped_column(index=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    request_note: Mapped[str] = mapped_column(Text, default="")
+    receipt_note: Mapped[str] = mapped_column(Text, default="")
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class NotebookTemplate(Base):
@@ -221,6 +301,18 @@ class EquipmentResource(Base):
 
 class EquipmentBooking(Base):
     __tablename__ = "equipment_bookings"
+    __table_args__ = (
+        Index(
+            "uq_equipment_booking_calendar_event",
+            "organization_id",
+            "equipment_id",
+            "source_calendar_uid",
+            "source_calendar_recurrence_id",
+            unique=True,
+            postgresql_where=text("source_calendar_uid IS NOT NULL"),
+            sqlite_where=text("source_calendar_uid IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     organization_id: Mapped[int] = mapped_column(index=True)
@@ -232,7 +324,31 @@ class EquipmentBooking(Base):
     starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     purpose: Mapped[str] = mapped_column(String(500))
+    source_calendar_uid: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    source_calendar_recurrence_id: Mapped[str] = mapped_column(String(40), default="", server_default="")
     status: Mapped[str] = mapped_column(String(24), default="reserved", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class EquipmentMaintenance(Base):
+    __tablename__ = "equipment_maintenance"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(index=True)
+    equipment_id: Mapped[int] = mapped_column(ForeignKey("equipment_resources.id"), index=True)
+    created_by_user_id: Mapped[int] = mapped_column()
+    title: Mapped[str] = mapped_column(String(200))
+    notes: Mapped[str] = mapped_column(Text, default="")
+    service_provider: Mapped[str] = mapped_column(String(200), default="")
+    service_contact_email: Mapped[str] = mapped_column(String(320), default="")
+    service_contact_phone: Mapped[str] = mapped_column(String(64), default="")
+    recurrence_days: Mapped[int | None] = mapped_column()
+    recurrence_unit: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    recurrence_anchor_day: Mapped[int | None] = mapped_column(nullable=True)
+    recurrence_until: Mapped[date | None] = mapped_column(Date, nullable=True)
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    status: Mapped[str] = mapped_column(String(24), default="scheduled", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
@@ -279,12 +395,15 @@ class WorkflowRule(Base):
     organization_id: Mapped[int] = mapped_column(index=True)
     project_id: Mapped[int] = mapped_column(index=True)
     name: Mapped[str] = mapped_column(String(160))
+    trigger_type: Mapped[str] = mapped_column(String(40), default="experiment_status_changed")
+    approval_outcome: Mapped[str | None] = mapped_column(String(16))
     from_status: Mapped[str | None] = mapped_column(String(32))
-    to_status: Mapped[str] = mapped_column(String(32))
+    to_status: Mapped[str | None] = mapped_column(String(32))
     task_title: Mapped[str] = mapped_column(String(200))
     task_description: Mapped[str] = mapped_column(Text, default="")
     task_priority: Mapped[str] = mapped_column(String(16), default="normal")
     due_days: Mapped[int | None] = mapped_column()
+    assigned_to_user_id: Mapped[int | None] = mapped_column()
     enabled: Mapped[bool] = mapped_column(default=True)
     created_by_user_id: Mapped[int] = mapped_column()
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

@@ -3,6 +3,7 @@ import io
 import json
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 from zipfile import ZIP_DEFLATED, ZipFile
 
@@ -10,7 +11,12 @@ import httpx
 import pytest
 from sqlalchemy import select
 
-from eln_common.contracts import ActivityEventCreate, ProjectAccessRead, ProjectRead
+from eln_common.contracts import (
+    ActivityEventCreate,
+    ProjectAccessRead,
+    ProjectRead,
+    SearchHit,
+)
 from eln_common.config import GatewaySettings
 from eln_common.database import Base, Database
 from eln_common.errors import (
@@ -28,9 +34,9 @@ from fastapi.testclient import TestClient
 from services.activity.app.models import ActivityEvent
 from services.activity.app.repository import ActivityRepository
 from services.activity.app.service import ActivityService
-from services.notebook.app.models import AuditEvent, Experiment, NotebookEntry
+from services.notebook.app.models import AuditEvent, Experiment, InventoryItem, NotebookEntry, Sample, StorageLocation
 from services.notebook.app.attachment_storage import AttachmentStorage
-from services.notebook.app.repository import NotebookRepository
+from services.notebook.app.repository import NotebookRepository, _search_text
 from services.notebook.app.router import create_router as create_notebook_router
 from services.notebook.app.service import NotebookService
 from services.projects.app.models import Project
@@ -45,7 +51,13 @@ from services.identity.app.security import (
     decode_access_token,
     verify_password,
 )
-from gateway.app.router import get_service_client, notebook_router, projects_router
+from gateway.app.router import (
+    get_service_client,
+    inventory_router,
+    notebook_router,
+    projects_router,
+    search_router,
+)
 
 
 def new_database() -> Database:
@@ -67,6 +79,284 @@ def test_project_creation_commits_project_and_outbox_event() -> None:
         assert event.entity_type == "project"
         assert event.entity_id == project.id
     database.engine.dispose()
+
+
+def test_project_search_is_organization_and_collaborator_scoped() -> None:
+    database = new_database()
+    with database.session() as db:
+        service = ProjectService(ProjectRepository(db), db)
+        owned = service.create_project(41, 7, "Cell lineage study", "Flow cytometry")
+        service.create_project(41, 8, "Cell imaging", "Microscopy")
+        service.create_project(99, 7, "Cell secret", "Private")
+
+        results = service.search_projects(41, 7, False, "lineage")
+        assert [project.id for project in results] == [owned.id]
+        assert service.search_projects(41, 7, False, "microscopy") == []
+        assert [project.name for project in service.search_projects(41, 7, True, "microscopy")] == [
+            "Cell imaging"
+        ]
+        assert service.search_projects(99, 7, False, "lineage") == []
+        with pytest.raises(InvalidInputError):
+            service.search_projects(41, 7, False, "x")
+    database.engine.dispose()
+
+
+def test_storage_location_lifecycle_validates_hierarchy_and_archiving() -> None:
+    database = new_database()
+    with database.session() as db:
+        service = NotebookService(NotebookRepository(db), db)
+        parent = service.create_storage_location(41, 7, {
+            "code": "ROOM-1", "name": "Room", "location_type": "room",
+            "parent_id": None, "description": "",
+        })
+        child = service.create_storage_location(41, 7, {
+            "code": "FRZ-1", "name": "Freezer", "location_type": "freezer",
+            "parent_id": parent.id, "description": "",
+        })
+        grandchild = service.create_storage_location(41, 7, {
+            "code": "BOX-1", "name": "Box", "location_type": "box",
+            "parent_id": child.id, "description": "",
+        })
+        db.add(InventoryItem(
+            organization_id=41, name="Assigned reagent", category="reagent", unit="ml",
+            location_id=grandchild.id,
+        ))
+        db.commit()
+        with pytest.raises(InvalidInputError, match="Move active inventory"):
+            service.set_storage_location_status(41, 7, grandchild.id, "archived")
+        db.query(InventoryItem).filter(InventoryItem.location_id == grandchild.id).update(
+            {InventoryItem.status: "archived"}
+        )
+        db.commit()
+
+        updated = service.update_storage_location(41, 7, child.id, {
+            "name": "Ultra low freezer", "description": "Shelf A",
+        })
+        assert updated.name == "Ultra low freezer"
+        with pytest.raises(InvalidInputError, match="nested beneath itself"):
+            service.update_storage_location(41, 7, parent.id, {"parent_id": grandchild.id})
+        with pytest.raises(InvalidInputError, match="code already exists"):
+            service.update_storage_location(41, 7, child.id, {"code": "ROOM-1"})
+        with pytest.raises(EntityNotFoundError):
+            service.update_storage_location(99, 7, child.id, {"name": "Cross tenant"})
+
+        with pytest.raises(InvalidInputError, match="active child"):
+            service.set_storage_location_status(41, 7, parent.id, "archived")
+        service.set_storage_location_status(41, 7, grandchild.id, "archived")
+        service.set_storage_location_status(41, 7, child.id, "archived")
+        service.set_storage_location_status(41, 7, parent.id, "archived")
+        with pytest.raises(InvalidInputError, match="parent first"):
+            service.set_storage_location_status(41, 7, child.id, "active")
+        service.set_storage_location_status(41, 7, parent.id, "active")
+        service.set_storage_location_status(41, 7, child.id, "active")
+        service.set_storage_location_status(41, 7, grandchild.id, "active")
+
+        with pytest.raises(EntityNotFoundError):
+            service.set_storage_location_status(99, 7, child.id, "archived")
+        assert len(service.list_storage_locations(41, active_only=False)) == 3
+    database.engine.dispose()
+
+
+def test_sample_moves_update_location_and_publish_history_event() -> None:
+    database = new_database()
+    with database.session() as db:
+        service = NotebookService(NotebookRepository(db), db)
+        first = service.create_storage_location(41, 7, {
+            "code": "FRZ-A", "name": "Freezer A", "location_type": "freezer",
+            "parent_id": None, "description": "",
+        })
+        second = service.create_storage_location(41, 7, {
+            "code": "FRZ-B", "name": "Freezer B", "location_type": "freezer",
+            "parent_id": None, "description": "",
+        })
+        sample = service.create_sample(41, 7, {
+            "name": "Cell line", "sample_type": "cell line", "external_id": "CL-1",
+            "project_id": None, "parent_sample_id": None,
+            "storage_location_id": first.id, "storage_location": "", "description": "",
+        })
+
+        moved = service.move_sample(41, sample.id, 7, {
+            "storage_location_id": second.id, "storage_location": "",
+        })
+        assert moved.storage_location_id == second.id
+        assert moved.storage_location == "Freezer B"
+        event = db.scalar(
+            select(OutboxEvent).where(
+                OutboxEvent.entity_type == "sample",
+                OutboxEvent.entity_id == sample.id,
+                OutboxEvent.action == "location_changed",
+            )
+        )
+        assert event is not None
+        assert event.details["from_location_id"] == str(first.id)
+        assert event.details["to_location_id"] == str(second.id)
+        with pytest.raises(EntityNotFoundError, match="Active storage location"):
+            service.move_sample(41, sample.id, 7, {
+                "storage_location_id": 9999, "storage_location": "",
+            })
+        with pytest.raises(EntityNotFoundError):
+            service.move_sample(99, sample.id, 7, {
+                "storage_location_id": None, "storage_location": "Remote",
+            })
+    database.engine.dispose()
+
+
+def test_activity_sample_history_is_scoped_and_only_contains_moves() -> None:
+    database = new_database()
+    with database.session() as db:
+        service = ActivityService(ActivityRepository(db), db)
+        service.record_event(ActivityEventCreate(
+            event_id="sample-move-1", source_service="notebook", action="location_changed",
+            entity_type="sample", entity_id=14, organization_id=41,
+            occurred_at=datetime.now(timezone.utc),
+            details={"from_location": "A", "to_location": "B"},
+        ))
+        service.record_event(ActivityEventCreate(
+            event_id="sample-status-1", source_service="notebook", action="sample_archived",
+            entity_type="sample", entity_id=14, organization_id=41,
+            occurred_at=datetime.now(timezone.utc), details={},
+        ))
+        service.record_event(ActivityEventCreate(
+            event_id="other-org-move", source_service="notebook", action="location_changed",
+            entity_type="sample", entity_id=14, organization_id=99,
+            occurred_at=datetime.now(timezone.utc), details={},
+        ))
+        events = service.list_sample_location_history(41, 14)
+        assert len(events) == 1
+        assert events[0].details == {"from_location": "A", "to_location": "B"}
+        assert service.list_sample_location_history(41, 999) == []
+    database.engine.dispose()
+
+
+def test_gateway_routes_sample_movement_and_history_with_project_access(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ELN_JWT_SECRET", "test-signing-secret-that-is-at-least-32-bytes")
+
+    class SampleClient:
+        async def get(
+            self, service, path, adapter, *, organization_id,
+            user_id=None, organization_role=None,
+        ):
+            if service == "notebook":
+                assert path == "/resources/sample/22"
+                return adapter.validate_python({
+                    "id": 22, "organization_id": 303, "name": "Cells",
+                    "sample_type": "cell line", "external_id": "C-22",
+                    "project_id": 5, "parent_sample_id": None,
+                    "storage_location": "Freezer B", "storage_location_id": 8,
+                    "description": "", "created_by_user_id": 9,
+                    "current_custodian_user_id": 9,
+                    "created_at": "2026-10-17T12:00:00Z", "status": "active",
+                })
+            if service == "projects":
+                assert path == "/projects/5/access"
+                return adapter.validate_python({"project_id": 5, "role": "editor"})
+            assert service == "activity"
+            assert path == "/activity/samples/22/history"
+            return adapter.validate_python([{
+                "id": 1, "event_id": "move-1", "source_service": "notebook",
+                "action": "location_changed", "entity_type": "sample",
+                "entity_id": 22, "organization_id": 303,
+                "occurred_at": "2026-10-17T12:00:00Z", "details": {"to_location": "Freezer B"},
+            }])
+
+        async def patch(self, service, path, payload, adapter, **kwargs):
+            assert service == "notebook"
+            assert path == "/samples/22/location"
+            assert payload == {"storage_location_id": 9, "storage_location": ""}
+            return adapter.validate_python({
+                "id": 22, "organization_id": 303, "name": "Cells",
+                "sample_type": "cell line", "external_id": "C-22",
+                "project_id": 5, "parent_sample_id": None,
+                "storage_location": "Freezer C", "storage_location_id": 9,
+                "description": "", "created_by_user_id": 9,
+                "current_custodian_user_id": 9,
+                "created_at": "2026-10-17T12:00:00Z", "status": "active",
+            })
+
+    app = FastAPI()
+    app.include_router(inventory_router)
+    app.dependency_overrides[get_service_client] = lambda: SampleClient()
+    client = TestClient(app)
+    token = create_access_token(
+        user_id=9, organization_id=303, role="member",
+        secret=b"test-signing-secret-that-is-at-least-32-bytes",
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+
+    moved = client.patch(
+        "/api/samples/22/location", headers=headers,
+        json={"storage_location_id": 9, "storage_location": ""},
+    )
+    assert moved.status_code == 200
+    assert moved.json()["storage_location"] == "Freezer C"
+    history = client.get("/api/samples/22/history", headers=headers)
+    assert history.status_code == 200
+    assert history.json()[0]["details"]["to_location"] == "Freezer B"
+
+
+def test_full_text_search_expression_uses_index_configuration() -> None:
+    from sqlalchemy.dialects import postgresql
+
+    expression = _search_text(
+        (NotebookEntry.title, NotebookEntry.content),
+        "cytokine response",
+        "%cytokine response%",
+        postgres=True,
+    )
+    compiled = str(expression.compile(dialect=postgresql.dialect()))
+    assert "to_tsvector('simple'::regconfig" in compiled
+    assert "plainto_tsquery('simple'::regconfig" in compiled
+    assert "@@" in compiled
+
+
+def test_gateway_search_uses_project_service_search_and_notebook_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ELN_JWT_SECRET", "test-signing-secret-that-is-at-least-32-bytes")
+    project = ProjectRead(
+        id=15,
+        organization_id=41,
+        name="Cell lineage",
+        description="Cytometry project",
+        created_at=datetime.now(timezone.utc),
+    )
+
+    class SearchClient:
+        async def get(self, service, path, adapter, **kwargs):
+            if service == "projects" and path == "/projects":
+                return [project]
+            if service == "projects" and path.startswith("/projects/search?"):
+                return [project]
+            if service == "notebook" and path == "/search?query=cytokine":
+                return [
+                    SearchHit(
+                        entity_type="entry",
+                        entity_id=3,
+                        title="Response",
+                        detail="Cytokine response increased.",
+                        project_id=15,
+                    )
+                ]
+            raise AssertionError(f"Unexpected search request: {service} {path}")
+
+    app = FastAPI()
+    app.include_router(search_router)
+    app.dependency_overrides[get_service_client] = lambda: SearchClient()
+    token = create_access_token(
+        user_id=7,
+        organization_id=41,
+        role="member",
+        secret=b"test-signing-secret-that-is-at-least-32-bytes",
+    )
+    client = TestClient(app)
+    response = client.get(
+        "/api/search?query=cytokine",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 200
+    assert [hit["entity_type"] for hit in response.json()] == ["project", "entry"]
 
 
 def test_notebook_flow_and_reliable_outbox() -> None:
@@ -180,6 +470,37 @@ def test_samples_validate_parent_and_are_organization_scoped() -> None:
         assert service.list_samples(99) == []
         with pytest.raises(EntityNotFoundError):
             service.create_sample(99, 14, {**values, "parent_sample_id": parent.id})
+    database.engine.dispose()
+
+
+def test_sample_lineage_preserves_project_and_parent_lifecycle() -> None:
+    database = new_database()
+    with database.session() as db:
+        service = NotebookService(NotebookRepository(db), db)
+        parent = service.create_sample(41, 12, {
+            "name": "Master culture", "sample_type": "cell_line", "project_id": 22,
+            "parent_sample_id": None, "storage_location": "", "description": "",
+        })
+        child = service.create_sample(41, 12, {
+            "name": "Passage 1", "sample_type": "cell_line", "project_id": None,
+            "parent_sample_id": parent.id, "storage_location": "", "description": "",
+        })
+        assert child.parent_sample_id == parent.id
+        assert child.project_id == parent.project_id
+        with pytest.raises(InvalidInputError, match="remain in its parent"):
+            service.create_sample(41, 12, {
+                "name": "Mis-scoped child", "sample_type": "cell_line", "project_id": 23,
+                "parent_sample_id": parent.id, "storage_location": "", "description": "",
+            })
+        with pytest.raises(InvalidInputError, match="active derived samples"):
+            service.update_resource_status(41, "sample", parent.id, 12, "archived")
+        service.update_resource_status(41, "sample", child.id, 12, "archived")
+        service.update_resource_status(41, "sample", parent.id, 12, "archived")
+        with pytest.raises(InvalidInputError, match="Archived samples cannot be used as a parent"):
+            service.create_sample(41, 12, {
+                "name": "From archived", "sample_type": "cell_line", "project_id": None,
+                "parent_sample_id": parent.id, "storage_location": "", "description": "",
+            })
     database.engine.dispose()
 
 
@@ -580,6 +901,44 @@ def test_equipment_bookings_reject_overlap_and_allow_cancelled_slots() -> None:
     database.engine.dispose()
 
 
+def test_equipment_maintenance_blocks_bookings_and_tracks_lifecycle() -> None:
+    database = new_database()
+    start = datetime.now(timezone.utc) + timedelta(days=1)
+    with database.session() as db:
+        service = NotebookService(NotebookRepository(db), db)
+        equipment = service.create_equipment(
+            41, 12, {"name": "Centrifuge", "description": "", "location": "Room 1"}
+        )
+        maintenance = service.create_equipment_maintenance(
+            41, equipment.id, 12,
+            {"title": "Annual calibration", "notes": "", "starts_at": start,
+             "ends_at": start + timedelta(hours=2)},
+        )
+        assert maintenance.status == "scheduled"
+        with pytest.raises(InvalidInputError, match="maintenance cannot be archived"):
+            service.update_resource_status(41, "equipment", equipment.id, 12, "archived")
+        with pytest.raises(InvalidInputError, match="scheduled maintenance"):
+            service.create_booking(41, equipment.id, 13, {
+                "starts_at": start + timedelta(minutes=30),
+                "ends_at": start + timedelta(hours=1),
+                "purpose": "Spin samples", "project_id": None,
+            })
+        with pytest.raises(InvalidInputError, match="another scheduled"):
+            service.create_equipment_maintenance(41, equipment.id, 12, {
+                "title": "Second service", "notes": "",
+                "starts_at": start + timedelta(hours=1),
+                "ends_at": start + timedelta(hours=3),
+            })
+        active = service.update_equipment_maintenance_status(41, maintenance.id, 12, "in_progress")
+        assert active.status == "in_progress"
+        completed = service.update_equipment_maintenance_status(41, maintenance.id, 12, "completed")
+        assert completed.status == "completed"
+        assert service.list_equipment_maintenance(99) == []
+        with pytest.raises(InvalidInputError, match="transition"):
+            service.update_equipment_maintenance_status(41, maintenance.id, 12, "cancelled")
+    database.engine.dispose()
+
+
 def test_equipment_routes_forward_actor_and_admin_headers() -> None:
     database = new_database()
     app = FastAPI()
@@ -609,6 +968,36 @@ def test_equipment_routes_forward_actor_and_admin_headers() -> None:
     )
     assert equipment_response.status_code == 201
     equipment_id = equipment_response.json()["id"]
+    maintenance_start = datetime.now(timezone.utc) + timedelta(days=2)
+    maintenance_body = {
+        "title": "Annual calibration",
+        "notes": "Reference weights and sensor verification",
+        "starts_at": maintenance_start.isoformat(),
+        "ends_at": (maintenance_start + timedelta(hours=2)).isoformat(),
+    }
+    assert client.post(
+        f"/equipment/{equipment_id}/maintenance",
+        headers=member_headers,
+        json=maintenance_body,
+    ).status_code == 403
+    maintenance_response = client.post(
+        f"/equipment/{equipment_id}/maintenance",
+        headers=admin_headers,
+        json=maintenance_body,
+    )
+    assert maintenance_response.status_code == 201
+    maintenance_id = maintenance_response.json()["id"]
+    assert len(client.get("/equipment/maintenance", headers=member_headers).json()) == 1
+    assert client.patch(
+        f"/equipment/maintenance/{maintenance_id}/status",
+        headers=member_headers,
+        json={"status": "in_progress"},
+    ).status_code == 403
+    assert client.patch(
+        f"/equipment/maintenance/{maintenance_id}/status",
+        headers=admin_headers,
+        json={"status": "in_progress"},
+    ).json()["status"] == "in_progress"
     booking_response = client.post(
         f"/equipment/{equipment_id}/bookings",
         headers=member_headers,
@@ -1427,3 +1816,419 @@ def test_invite_only_identity_login_refresh_and_revocation(
         with pytest.raises(AuthenticationError):
             service.login("life-sciences", "owner@example.org", "a-secure-password-123")
     database.engine.dispose()
+
+
+def test_storage_locations_and_hierarchical_structures() -> None:
+    database = new_database()
+    with database.session() as db:
+        service = NotebookService(NotebookRepository(db), db)
+        
+        # 1. Create root location
+        building = service.create_storage_location(
+            organization_id=1,
+            user_id=10,
+            values={
+                "code": "BLD-A",
+                "name": "Building Alpha",
+                "location_type": "building",
+                "description": "Main research facility",
+            },
+        )
+        assert building.id is not None
+        assert building.code == "BLD-A"
+
+        # 2. Create child location
+        freezer = service.create_storage_location(
+            organization_id=1,
+            user_id=10,
+            values={
+                "code": "FRZ-80",
+                "name": "-80C Freezer 1",
+                "location_type": "freezer",
+                "parent_id": building.id,
+                "description": "Deep freezer in room 101",
+            },
+        )
+        assert freezer.parent_id == building.id
+
+        # 3. List storage locations
+        locations = service.list_storage_locations(organization_id=1)
+        assert len(locations) == 2
+        assert [loc.code for loc in locations] == ["BLD-A", "FRZ-80"]
+
+        # 4. Create inventory item assigned to structured location
+        item = service.create_inventory_item(
+            organization_id=1,
+            user_id=10,
+            values={
+                "name": "Enzyme Taq",
+                "category": "reagent",
+                "catalog_number": "TAQ-100",
+                "lot_number": "L123",
+                "quantity": Decimal("10"),
+                "unit": "vials",
+                "location_id": freezer.id,
+            },
+        )
+        assert item.location_id == freezer.id
+        assert item.location == "-80C Freezer 1"
+
+        # 5. Create sample assigned to structured location
+        sample = service.create_sample(
+            organization_id=1,
+            user_id=10,
+            values={
+                "name": "Tissue biopsy A",
+                "sample_type": "tissue",
+                "storage_location_id": freezer.id,
+            },
+        )
+        assert sample.storage_location_id == freezer.id
+        assert sample.storage_location == "-80C Freezer 1"
+
+        # 6. Create equipment assigned to structured location
+        equipment = service.create_equipment(
+            organization_id=1,
+            user_id=10,
+            values={
+                "name": "Centrifuge 5424",
+                "storage_location_id": building.id,
+            },
+        )
+        assert equipment.storage_location_id == building.id
+        assert equipment.location == "Building Alpha"
+
+        # 7. Invalid parent location
+        with pytest.raises(EntityNotFoundError):
+            service.create_storage_location(
+                organization_id=1,
+                user_id=10,
+                values={
+                    "code": "BAD-LOC",
+                    "name": "Invalid",
+                    "parent_id": 99999,
+                },
+            )
+
+    database.engine.dispose()
+
+
+def test_workflow_rules_triggers_task_creation_on_status_change() -> None:
+    database = new_database()
+    with database.session() as db:
+        service = NotebookService(NotebookRepository(db), db)
+        
+        # Create experiment
+        experiment = service.create_experiment(1, project_id=1, name="PCR Analysis", description="")
+        assert experiment.status == "in_progress"
+
+        # Create workflow rule: in_progress -> completed creates a task
+        rule = service.create_workflow_rule(
+            organization_id=1,
+            user_id=10,
+            values={
+                "project_id": 1,
+                "name": "Post-completion review",
+                "from_status": "in_progress",
+                "to_status": "completed",
+                "task_title": "Review PCR Gel Electrophoresis Results",
+                "task_description": "Validate bands and document findings.",
+                "task_priority": "high",
+                "due_days": 3,
+            },
+        )
+        assert rule.id is not None
+        assert rule.enabled is True
+
+        rules = service.list_workflow_rules(organization_id=1, project_id=1)
+        assert len(rules) == 1
+
+        # Transition experiment status
+        updated_experiment = service.update_experiment_status(
+            organization_id=1,
+            experiment_id=experiment.id,
+            user_id=10,
+            status="completed",
+        )
+        assert updated_experiment.status == "completed"
+
+        # Verify task was automatically created by the rule
+        tasks = service.list_tasks(organization_id=1, project_id=1)
+        assert len(tasks) == 1
+        created_task = tasks[0]
+        assert created_task.title == "Review PCR Gel Electrophoresis Results"
+        assert created_task.priority == "high"
+        assert created_task.experiment_id == experiment.id
+        assert created_task.due_at is not None
+
+    database.engine.dispose()
+
+
+def test_workflow_rules_can_be_edited_paused_and_restored() -> None:
+    database = new_database()
+    with database.session() as db:
+        service = NotebookService(NotebookRepository(db), db)
+        rule = service.create_workflow_rule(41, 7, {
+            "project_id": 12, "name": "Review on completion",
+            "from_status": "in_progress", "to_status": "completed",
+            "task_title": "Review results", "task_description": "",
+            "task_priority": "normal", "due_days": 2,
+        })
+        updated = service.update_workflow_rule(41, 12, rule.id, 7, {
+            "name": "Quality review", "from_status": None,
+            "task_priority": "high", "due_days": None,
+        })
+        assert updated.name == "Quality review"
+        assert updated.from_status is None
+        assert updated.task_priority == "high"
+        assert updated.due_days is None
+        with pytest.raises(InvalidInputError, match="must differ"):
+            service.update_workflow_rule(41, 12, rule.id, 7, {
+                "from_status": "completed",
+            })
+        with pytest.raises(EntityNotFoundError):
+            service.update_workflow_rule(99, 12, rule.id, 7, {"name": "Cross tenant"})
+        paused = service.set_workflow_rule_enabled(41, 12, rule.id, 7, False)
+        assert paused.enabled is False
+        enabled = service.set_workflow_rule_enabled(41, 12, rule.id, 7, True)
+        assert enabled.enabled is True
+        actions = list(db.scalars(select(OutboxEvent.action).where(
+            OutboxEvent.entity_type == "workflow_rule",
+            OutboxEvent.entity_id == rule.id,
+        )))
+        assert sorted(actions) == sorted([
+            "workflow_rule_updated", "workflow_rule_disabled", "workflow_rule_enabled",
+        ])
+    database.engine.dispose()
+
+
+def test_entry_timestamping_and_proof_download(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    database = new_database()
+    cert_file = tmp_path / "tsa-signer.pem"
+    cert_file.write_bytes(b"-----BEGIN CERTIFICATE-----\nFAKE CERT\n-----END CERTIFICATE-----")
+
+    with database.session() as db:
+        service = NotebookService(NotebookRepository(db), db)
+        experiment = service.create_experiment(1, project_id=1, name="Sequencing", description="")
+        entry = service.create_entry(1, experiment.id, "Run 001", "Base calling results")
+
+        # 1. Without configuration -> ServiceUnavailableError
+        monkeypatch.delenv("ELN_TSA_URL", raising=False)
+        monkeypatch.delenv("ELN_TSA_CERTIFICATE_FILE", raising=False)
+        with pytest.raises(ServiceUnavailableError):
+            service.create_entry_timestamp(1, entry.id, user_id=10)
+
+        # 2. With non-https URL -> InvalidInputError
+        monkeypatch.setenv("ELN_TSA_URL", "http://insecure-tsa.example.org")
+        monkeypatch.setenv("ELN_TSA_CERTIFICATE_FILE", str(cert_file))
+        with pytest.raises(InvalidInputError):
+            service.create_entry_timestamp(1, entry.id, user_id=10)
+
+        # 3. With mock timestamper
+        monkeypatch.setenv("ELN_TSA_URL", "https://tsa.example.org/tsr")
+        
+        class FakeRemoteTimestamper:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def timestamp(self, data: bytes) -> bytes:
+                return b"fake-asn1-timestamp-token"
+
+        fake_ts = datetime(2026, 10, 13, 12, 0, 0, tzinfo=timezone.utc)
+        monkeypatch.setattr("services.notebook.app.service.RemoteTimestamper", FakeRemoteTimestamper)
+        monkeypatch.setattr("services.notebook.app.service.get_timestamp", lambda token: fake_ts)
+
+        record = service.create_entry_timestamp(1, entry.id, user_id=10)
+        assert record.id is not None
+        assert record.entry_id == entry.id
+        assert record.token_der == b"fake-asn1-timestamp-token"
+        tsa_time = record.tsa_time.replace(tzinfo=timezone.utc) if record.tsa_time.tzinfo is None else record.tsa_time
+        assert tsa_time == fake_ts
+
+        timestamps = service.list_entry_timestamps(1, entry.id)
+        assert len(timestamps) == 1
+        assert timestamps[0].id == record.id
+
+        # Verify router proof ZIP download
+        app = FastAPI()
+        app.include_router(create_notebook_router(database))
+        client = TestClient(app)
+        headers = {"X-Organization-ID": "1", "X-User-ID": "10", "X-Organization-Role": "member"}
+
+        res = client.get(f"/entries/{entry.id}/timestamps/{record.id}/proof", headers=headers)
+        assert res.status_code == 200
+        assert res.headers["content-type"] == "application/zip"
+        with ZipFile(io.BytesIO(res.content)) as archive:
+            assert "snapshot.json" in archive.namelist()
+            assert "timestamp.tsr" in archive.namelist()
+            assert "tsa-signer.pem" in archive.namelist()
+            assert "proof.json" in archive.namelist()
+            assert archive.read("timestamp.tsr") == b"fake-asn1-timestamp-token"
+            assert archive.read("tsa-signer.pem") == cert_file.read_bytes()
+
+    database.engine.dispose()
+
+
+def test_project_import_accepts_ro_crate_eln_zip(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ELN_JWT_SECRET", "test-signing-secret-that-is-at-least-32-bytes")
+    created_experiments: list[dict] = []
+    created_entries: list[dict] = []
+    uploaded: list[bytes] = []
+
+    class ImportClient:
+        async def get(
+            self,
+            service: str,
+            path: str,
+            adapter: TypeAdapter,
+            *,
+            organization_id: int,
+            user_id: int | None = None,
+            organization_role: str | None = None,
+        ):
+            if path == "/projects/5/access":
+                return adapter.validate_python({"project_id": 5, "role": "owner"})
+            if path == "/projects/5":
+                return adapter.validate_python(
+                    {
+                        "id": 5,
+                        "organization_id": organization_id,
+                        "name": "RO-Crate Target",
+                        "description": "",
+                        "created_at": "2026-10-10T12:00:00Z",
+                    }
+                )
+            raise AssertionError(f"Unexpected GET: {service} {path}")
+
+        async def post(
+            self,
+            service: str,
+            path: str,
+            payload: dict,
+            adapter: TypeAdapter,
+            *,
+            organization_id: int,
+            user_id: int | None = None,
+            organization_role: str | None = None,
+        ):
+            if path == "/projects/5/experiments":
+                created_experiments.append(payload)
+                return adapter.validate_python(
+                    {
+                        "id": 25,
+                        "organization_id": organization_id,
+                        "project_id": 5,
+                        "name": payload["name"],
+                        "description": payload["description"],
+                        "status": "in_progress",
+                        "created_at": "2026-10-10T12:00:00Z",
+                        "updated_at": "2026-10-10T12:00:00Z",
+                    }
+                )
+            if path == "/experiments/25/entries":
+                created_entries.append(payload)
+                return adapter.validate_python(
+                    {
+                        "id": 35,
+                        "experiment_id": 25,
+                        "title": payload["title"],
+                        "content": payload["content"],
+                        "created_at": "2026-10-10T12:00:00Z",
+                        "updated_at": "2026-10-10T12:00:00Z",
+                    }
+                )
+            raise AssertionError(f"Unexpected POST: {service} {path}")
+
+        async def put(self, *args, **kwargs):
+            return None
+
+        async def post_bytes(
+            self,
+            service: str,
+            path: str,
+            content: bytes,
+            adapter: TypeAdapter,
+            *,
+            organization_id: int,
+            user_id: int,
+            content_type: str,
+        ):
+            uploaded.append(content)
+            return adapter.validate_python(
+                {
+                    "id": 45,
+                    "organization_id": organization_id,
+                    "entry_id": 35,
+                    "original_filename": "figure.png",
+                    "media_type": content_type,
+                    "size_bytes": len(content),
+                    "sha256": "0" * 64,
+                    "uploaded_by_user_id": user_id,
+                    "created_at": "2026-10-10T12:00:00Z",
+                }
+            )
+
+    app = FastAPI()
+    app.include_router(projects_router)
+    app.dependency_overrides[get_service_client] = lambda: ImportClient()
+    client = TestClient(app)
+    token = create_access_token(
+        user_id=9,
+        organization_id=303,
+        role="member",
+        secret=b"test-signing-secret-that-is-at-least-32-bytes",
+    )
+
+    # Build valid RO-Crate ZIP
+    ro_crate_metadata = {
+        "@context": "https://w3id.org/ro/crate/1.1/context",
+        "@graph": [
+            {
+                "@id": "ro-crate-metadata.json",
+                "@type": "CreativeWork",
+                "about": {"@id": "./"},
+            },
+            {
+                "@id": "./",
+                "@type": "Dataset",
+                "name": "RO-Crate Root",
+                "hasPart": [
+                    {"@id": "rec-1"}
+                ],
+            },
+            {
+                "@id": "rec-1",
+                "@type": "Dataset",
+                "name": "Enzyme Kinetics Study",
+                "text": "Recorded absorbance at 450nm with figure <img src='figure.png'>",
+                "keywords": ["kinetics", "spectrophotometry"],
+                "hasPart": [
+                    {"@id": "figure.png"}
+                ],
+            },
+            {
+                "@id": "figure.png",
+                "@type": "File",
+                "name": "figure.png",
+            },
+        ],
+    }
+
+    bundle = io.BytesIO()
+    with ZipFile(bundle, "w", compression=ZIP_DEFLATED) as archive:
+        archive.writestr("ro-crate-metadata.json", json.dumps(ro_crate_metadata))
+        archive.writestr("figure.png", b"fake-png-bytes")
+
+    response = client.post(
+        "/api/projects/5/import",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": ("dataset.eln", bundle.getvalue(), "application/zip")},
+    )
+    assert response.status_code == 201, response.text
+    result = response.json()
+    assert result["experiments_imported"] == 1
+    assert result["entries_imported"] == 1
+    assert result["attachments_imported"] == 1
+    assert created_experiments[0]["name"] == "Enzyme Kinetics Study"
+    assert created_entries[0]["title"] == "Enzyme Kinetics Study"
+    assert uploaded == [b"fake-png-bytes"]

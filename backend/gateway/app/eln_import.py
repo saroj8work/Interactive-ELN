@@ -3,6 +3,7 @@ import mimetypes
 import posixpath
 import re
 from pathlib import PurePosixPath
+from urllib.parse import urlsplit
 from zipfile import BadZipFile, ZipFile
 
 from eln_common.contracts import (
@@ -128,13 +129,32 @@ def import_eln_crate(
     ]
     if not importable:
         raise HTTPException(status_code=422, detail="RO-Crate contains no importable records.")
+    if len(importable) > 1000:
+        raise HTTPException(status_code=413, detail="RO-Crate contains too many records.")
 
     imported_files: dict[str, bytes] = {}
     file_path_to_virtual_path: dict[str, str] = {}
     experiments: list[ProjectImportExperiment] = []
+    imported_entry_count = 0
+    total_text_bytes = 0
+    total_attachment_bytes = 0
 
     def make_entry(node: dict, fallback_title: str) -> ProjectImportEntry:
+        nonlocal imported_entry_count, total_text_bytes, total_attachment_bytes
         content = _entity_text(node.get("text"))
+        if len(content) > 100_000:
+            raise HTTPException(
+                status_code=413, detail="An imported notebook entry exceeds 100,000 characters."
+            )
+        total_text_bytes += len(content.encode("utf-8"))
+        if total_text_bytes > 100 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="RO-Crate text exceeds the import size limit.")
+        imported_entry_count += 1
+        if imported_entry_count > 5000:
+            raise HTTPException(status_code=413, detail="RO-Crate contains too many notebook entries.")
+        title = node.get("name") or fallback_title
+        if not isinstance(title, str) or len(title) > 200:
+            raise HTTPException(status_code=422, detail="An imported notebook entry has an invalid title.")
         attachments: list[ProjectImportAttachment] = []
         references = _references(node.get("hasPart"))
         html_paths = re.findall(
@@ -142,16 +162,29 @@ def import_eln_crate(
         )
         entry_paths: set[str] = set()
         for reference in [*references, *html_paths]:
+            if reference in nodes:
+                referenced_node = nodes[reference]
+                if not (
+                    isinstance(referenced_node, dict)
+                    and "File" in _references(referenced_node.get("@type"))
+                ):
+                    continue
+            elif urlsplit(reference).scheme:
+                continue
+            elif not _safe_member_path(reference):
+                raise HTTPException(status_code=422, detail="RO-Crate contains an unsafe file reference.")
             file_path = _crate_member(reference, members)
-            if file_path is None or file_path in entry_paths:
+            if file_path is None:
+                raise HTTPException(status_code=422, detail="RO-Crate references a missing attachment.")
+            if file_path in entry_paths:
                 continue
             info = members[file_path]
-            if info.is_dir() or info.file_size > MAX_ATTACHMENT_BYTES:
-                if info.file_size > MAX_ATTACHMENT_BYTES:
-                    raise HTTPException(
-                        status_code=413, detail="An imported attachment exceeds 25 MiB."
-                    )
-                continue
+            if info.is_dir() or info.external_attr >> 16 & 0o170000 == 0o120000:
+                raise HTTPException(status_code=422, detail="RO-Crate contains an invalid attachment entry.")
+            if info.file_size > MAX_ATTACHMENT_BYTES:
+                raise HTTPException(
+                    status_code=413, detail="An imported attachment exceeds 25 MiB."
+                )
             if file_path == metadata_path:
                 continue
             virtual_path = file_path_to_virtual_path.get(file_path)
@@ -168,6 +201,11 @@ def import_eln_crate(
                     raise HTTPException(
                         status_code=422, detail="Imported attachment size is inconsistent."
                     )
+                total_attachment_bytes += len(attachment_data)
+                if total_attachment_bytes > 100 * 1024 * 1024:
+                    raise HTTPException(
+                        status_code=413, detail="RO-Crate attachments exceed the import size limit."
+                    )
                 virtual_path = f"attachments/entry-{len(imported_files) + 1}"
                 imported_files[virtual_path] = attachment_data
                 file_path_to_virtual_path[file_path] = virtual_path
@@ -180,13 +218,16 @@ def import_eln_crate(
                 )
             )
         return ProjectImportEntry(
-            title=str(node.get("name") or fallback_title)[:200],
-            content=content[:100_000],
+            title=title,
+            content=content,
             tags=_node_keywords(node),
             attachments=attachments,
         )
 
     for index, record in enumerate(importable[:1000], start=1):
+        experiment_name = record.get("name") or f"Imported record {index}"
+        if not isinstance(experiment_name, str) or len(experiment_name) > 160:
+            raise HTTPException(status_code=422, detail="An imported record has an invalid name.")
         children = [
             nodes[reference]
             for reference in _references(record.get("hasPart"))
@@ -206,7 +247,7 @@ def import_eln_crate(
         experiments.append(
             ProjectImportExperiment(
                 experiment=ProjectImportExperimentInfo(
-                    name=str(record.get("name") or f"Imported record {index}")[:160],
+                    name=experiment_name,
                     description="Imported from an ELN Consortium RO-Crate.",
                 ),
                 tags=_node_keywords(record),

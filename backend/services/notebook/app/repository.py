@@ -1,7 +1,7 @@
 from decimal import Decimal
 from datetime import datetime, timezone
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, literal_column, or_, select, update
 from sqlalchemy.orm import Session
 
 from .models import (
@@ -10,6 +10,7 @@ from .models import (
     EntryAttachment,
     EntryRevision,
     EquipmentBooking,
+    EquipmentMaintenance,
     EquipmentResource,
     InventoryItem,
     LabTask,
@@ -18,8 +19,27 @@ from .models import (
     RecordTag,
     RecordSignature,
     Sample,
+    SampleCustodyTransfer,
     StockMovement,
 )
+
+
+_SIMPLE_CONFIG = literal_column("'simple'::regconfig")
+_EMPTY_TEXT = literal_column("''")
+_SPACE_TEXT = literal_column("' '")
+
+
+def _search_text(columns, query: str, pattern: str, *, postgres: bool):
+    if postgres:
+        document = func.coalesce(columns[0], _EMPTY_TEXT)
+        for column in columns[1:]:
+            document = document.op("||")(_SPACE_TEXT).op("||")(
+                func.coalesce(column, _EMPTY_TEXT)
+            )
+        return func.to_tsvector(_SIMPLE_CONFIG, document).op("@@")(
+            func.plainto_tsquery(_SIMPLE_CONFIG, query)
+        )
+    return or_(*(column.ilike(pattern, escape="\\") for column in columns))
 
 class NotebookRepository:
     def __init__(self, db: Session):
@@ -364,12 +384,68 @@ class NotebookRepository:
             )
         )
 
-    def get_sample(self, organization_id: int, sample_id: int) -> Sample | None:
-        return self._db.scalar(
-            select(Sample).where(
-                Sample.organization_id == organization_id, Sample.id == sample_id
-            )
+    def get_sample(
+        self, organization_id: int, sample_id: int, *, lock: bool = False
+    ) -> Sample | None:
+        statement = select(Sample).where(
+            Sample.organization_id == organization_id, Sample.id == sample_id
         )
+        if lock:
+            statement = statement.with_for_update()
+        return self._db.scalar(statement)
+
+    def add_sample_custody_transfer(self, transfer: SampleCustodyTransfer) -> SampleCustodyTransfer:
+        self._db.add(transfer)
+        self._db.flush()
+        return transfer
+
+    def get_sample_custody_transfer(
+        self, organization_id: int, sample_id: int, transfer_id: int, *, lock: bool = False
+    ) -> SampleCustodyTransfer | None:
+        statement = select(SampleCustodyTransfer).where(
+            SampleCustodyTransfer.organization_id == organization_id,
+            SampleCustodyTransfer.sample_id == sample_id,
+            SampleCustodyTransfer.id == transfer_id,
+        )
+        if lock:
+            statement = statement.with_for_update()
+        return self._db.scalar(statement)
+
+    def get_pending_sample_custody_transfer(
+        self, organization_id: int, sample_id: int
+    ) -> SampleCustodyTransfer | None:
+        return self._db.scalar(select(SampleCustodyTransfer).where(
+            SampleCustodyTransfer.organization_id == organization_id,
+            SampleCustodyTransfer.sample_id == sample_id,
+            SampleCustodyTransfer.status == "pending",
+        ))
+
+    def list_sample_custody_transfers(
+        self, organization_id: int, sample_id: int
+    ) -> list[SampleCustodyTransfer]:
+        return list(self._db.scalars(select(SampleCustodyTransfer).where(
+            SampleCustodyTransfer.organization_id == organization_id,
+            SampleCustodyTransfer.sample_id == sample_id,
+        ).order_by(SampleCustodyTransfer.requested_at, SampleCustodyTransfer.id)))
+
+    def list_pending_sample_custody_transfers_for_user(
+        self, organization_id: int, user_id: int
+    ) -> list[SampleCustodyTransfer]:
+        return list(self._db.scalars(select(SampleCustodyTransfer).where(
+            SampleCustodyTransfer.organization_id == organization_id,
+            SampleCustodyTransfer.status == "pending",
+            or_(
+                SampleCustodyTransfer.from_user_id == user_id,
+                SampleCustodyTransfer.to_user_id == user_id,
+            ),
+        ).order_by(SampleCustodyTransfer.requested_at, SampleCustodyTransfer.id)))
+
+    def has_active_sample_children(self, organization_id: int, sample_id: int) -> bool:
+        return self._db.scalar(select(Sample.id).where(
+            Sample.organization_id == organization_id,
+            Sample.parent_sample_id == sample_id,
+            Sample.status == "active",
+        ).limit(1)) is not None
 
     def get_audit_head(self, organization_id: int) -> AuditEvent | None:
         return self._db.scalar(
@@ -454,6 +530,16 @@ class NotebookRepository:
             )
             is not None
         )
+
+    def has_active_equipment_maintenance(
+        self, organization_id: int, equipment_id: int
+    ) -> bool:
+        return self._db.scalar(select(EquipmentMaintenance.id).where(
+            EquipmentMaintenance.organization_id == organization_id,
+            EquipmentMaintenance.equipment_id == equipment_id,
+            EquipmentMaintenance.status.in_(("scheduled", "in_progress")),
+            EquipmentMaintenance.ends_at > datetime.now(timezone.utc),
+        ).limit(1)) is not None
 
     def list_tasks(self, organization_id: int, project_id: int) -> list[LabTask]:
         return list(
@@ -617,6 +703,39 @@ class NotebookRepository:
         self._db.flush()
         return booking
 
+    def list_maintenance(self, organization_id: int) -> list[EquipmentMaintenance]:
+        return list(self._db.scalars(
+            select(EquipmentMaintenance)
+            .where(EquipmentMaintenance.organization_id == organization_id)
+            .order_by(EquipmentMaintenance.starts_at, EquipmentMaintenance.id)
+        ))
+
+    def get_maintenance(self, organization_id: int, maintenance_id: int) -> EquipmentMaintenance | None:
+        return self._db.scalar(select(EquipmentMaintenance).where(
+            EquipmentMaintenance.organization_id == organization_id,
+            EquipmentMaintenance.id == maintenance_id,
+        ))
+
+    def add_maintenance(self, maintenance: EquipmentMaintenance) -> EquipmentMaintenance:
+        self._db.add(maintenance)
+        self._db.flush()
+        return maintenance
+
+    def has_maintenance_conflict(
+        self, organization_id: int, equipment_id: int, starts_at: datetime, ends_at: datetime,
+        *, exclude_maintenance_id: int | None = None,
+    ) -> bool:
+        statement = select(EquipmentMaintenance.id).where(
+            EquipmentMaintenance.organization_id == organization_id,
+            EquipmentMaintenance.equipment_id == equipment_id,
+            EquipmentMaintenance.status.in_(("scheduled", "in_progress")),
+            EquipmentMaintenance.starts_at < ends_at,
+            EquipmentMaintenance.ends_at > starts_at,
+        )
+        if exclude_maintenance_id is not None:
+            statement = statement.where(EquipmentMaintenance.id != exclude_maintenance_id)
+        return self._db.scalar(statement.limit(1)) is not None
+
     def add_attachment(self, attachment: EntryAttachment) -> EntryAttachment:
         self._db.add(attachment)
         self._db.flush()
@@ -626,17 +745,22 @@ class NotebookRepository:
         self, organization_id: int, query: str
     ) -> list[tuple[str, int, str, str, int | None]]:
         pattern = "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        postgres = self._db.get_bind().dialect.name == "postgresql"
+
+        def matches(*columns):
+            return _search_text(columns, query, pattern, postgres=postgres)
+
         hits: list[tuple[str, int, str, str, int | None]] = []
         experiments = self._db.scalars(
             select(Experiment).where(
                 Experiment.organization_id == organization_id,
-                (Experiment.name.ilike(pattern, escape="\\"))
+                matches(Experiment.name, Experiment.description)
                 | select(RecordTag.id)
                 .where(
                     RecordTag.organization_id == organization_id,
                     RecordTag.entity_type == "experiment",
                     RecordTag.entity_id == Experiment.id,
-                    RecordTag.tag.ilike(pattern, escape="\\"),
+                    matches(RecordTag.tag),
                 )
                 .exists(),
             ).limit(100)
@@ -651,14 +775,13 @@ class NotebookRepository:
             .where(
                 NotebookEntry.organization_id == organization_id,
                 Experiment.organization_id == organization_id,
-                (NotebookEntry.title.ilike(pattern, escape="\\"))
-                | (NotebookEntry.content.ilike(pattern, escape="\\"))
+                matches(NotebookEntry.title, NotebookEntry.content)
                 | select(RecordTag.id)
                 .where(
                     RecordTag.organization_id == organization_id,
                     RecordTag.entity_type == "entry",
                     RecordTag.entity_id == NotebookEntry.id,
-                    RecordTag.tag.ilike(pattern, escape="\\"),
+                    matches(RecordTag.tag),
                 )
                 .exists(),
             )
@@ -673,15 +796,20 @@ class NotebookRepository:
             .where(
                 InventoryItem.organization_id == organization_id,
                 InventoryItem.status == "active",
-                (InventoryItem.name.ilike(pattern, escape="\\"))
-                | (InventoryItem.catalog_number.ilike(pattern, escape="\\"))
-                | (InventoryItem.lot_number.ilike(pattern, escape="\\"))
+                matches(
+                    InventoryItem.name,
+                    InventoryItem.category,
+                    InventoryItem.catalog_number,
+                    InventoryItem.lot_number,
+                    InventoryItem.location,
+                    InventoryItem.notes,
+                )
                 | select(RecordTag.id)
                 .where(
                     RecordTag.organization_id == organization_id,
                     RecordTag.entity_type == "inventory",
                     RecordTag.entity_id == InventoryItem.id,
-                    RecordTag.tag.ilike(pattern, escape="\\"),
+                    matches(RecordTag.tag),
                 )
                 .exists(),
             )
@@ -696,15 +824,19 @@ class NotebookRepository:
             .where(
                 Sample.organization_id == organization_id,
                 Sample.status == "active",
-                (Sample.name.ilike(pattern, escape="\\"))
-                | (Sample.external_id.ilike(pattern, escape="\\"))
-                | (Sample.sample_type.ilike(pattern, escape="\\"))
+                matches(
+                    Sample.name,
+                    Sample.external_id,
+                    Sample.sample_type,
+                    Sample.storage_location,
+                    Sample.description,
+                )
                 | select(RecordTag.id)
                 .where(
                     RecordTag.organization_id == organization_id,
                     RecordTag.entity_type == "sample",
                     RecordTag.entity_id == Sample.id,
-                    RecordTag.tag.ilike(pattern, escape="\\"),
+                    matches(RecordTag.tag),
                 )
                 .exists(),
             )
@@ -719,15 +851,18 @@ class NotebookRepository:
             .where(
                 EquipmentResource.organization_id == organization_id,
                 EquipmentResource.status == "active",
-                (EquipmentResource.name.ilike(pattern, escape="\\"))
-                | (EquipmentResource.location.ilike(pattern, escape="\\"))
-                | (EquipmentResource.category.ilike(pattern, escape="\\"))
+                matches(
+                    EquipmentResource.name,
+                    EquipmentResource.location,
+                    EquipmentResource.category,
+                    EquipmentResource.description,
+                )
                 | select(RecordTag.id)
                 .where(
                     RecordTag.organization_id == organization_id,
                     RecordTag.entity_type == "equipment",
                     RecordTag.entity_id == EquipmentResource.id,
-                    RecordTag.tag.ilike(pattern, escape="\\"),
+                    matches(RecordTag.tag),
                 )
                 .exists(),
             )
@@ -742,14 +877,13 @@ class NotebookRepository:
             .where(
                 NotebookTemplate.organization_id == organization_id,
                 NotebookTemplate.status == "active",
-                (NotebookTemplate.name.ilike(pattern, escape="\\"))
-                | (NotebookTemplate.description.ilike(pattern, escape="\\"))
+                matches(NotebookTemplate.name, NotebookTemplate.description)
                 | select(RecordTag.id)
                 .where(
                     RecordTag.organization_id == organization_id,
                     RecordTag.entity_type == "template",
                     RecordTag.entity_id == NotebookTemplate.id,
-                    RecordTag.tag.ilike(pattern, escape="\\"),
+                    matches(RecordTag.tag),
                 )
                 .exists(),
             )

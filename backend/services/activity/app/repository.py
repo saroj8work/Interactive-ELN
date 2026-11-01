@@ -19,6 +19,28 @@ class ActivityRepository:
             )
         )
 
+    def list_sample_location_history(
+        self, organization_id: int, sample_id: int, limit: int = 100
+    ) -> list[ActivityEvent]:
+        return list(
+            self._db.scalars(
+                select(ActivityEvent)
+                .where(
+                    ActivityEvent.organization_id == organization_id,
+                    ActivityEvent.entity_type == "sample",
+                    ActivityEvent.entity_id == sample_id,
+                    ActivityEvent.action.in_([
+                        "location_changed",
+                        "custody_transfer_requested",
+                        "custody_transfer_accepted",
+                        "custody_transfer_cancelled",
+                    ]),
+                )
+                .order_by(ActivityEvent.occurred_at.desc(), ActivityEvent.id.desc())
+                .limit(limit)
+            )
+        )
+
     def add_if_new(self, event: ActivityEvent) -> ActivityEvent:
         values = {
             "event_id": event.event_id,

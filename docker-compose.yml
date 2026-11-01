@@ -141,6 +141,8 @@ services:
       dockerfile: backend/Dockerfile.activity
     environment:
       ACTIVITY_DATABASE_URL: postgresql+psycopg://activity:activity_dev_only@activity-db:5432/activity
+      ELN_WEBHOOK_ENCRYPTION_KEY: ${ELN_WEBHOOK_ENCRYPTION_KEY:-}
+      ELN_WEBHOOK_ALLOWED_HOSTS: ${ELN_WEBHOOK_ALLOWED_HOSTS:-}
     depends_on:
       activity-migrate:
         condition: service_completed_successfully
@@ -175,6 +177,8 @@ services:
       ACTIVITY_SERVICE_URL: http://activity-service:8003
       ELN_ATTACHMENT_DIR: /var/lib/eln-attachments
       ELN_AUDIT_HMAC_KEY: ${ELN_AUDIT_HMAC_KEY:?Set ELN_AUDIT_HMAC_KEY in .env}
+      ELN_TSA_URL: ${ELN_TSA_URL:-}
+      ELN_TSA_CERTIFICATE_FILE: ${ELN_TSA_CERTIFICATE_FILE:-}
     volumes:
       - notebook-attachments:/var/lib/eln-attachments
     depends_on:
@@ -195,12 +199,15 @@ services:
       PROJECTS_SERVICE_URL: http://projects-service:8001
       NOTEBOOK_SERVICE_URL: http://notebook-service:8002
       ACTIVITY_SERVICE_URL: http://activity-service:8003
+      IDENTITY_SERVICE_URL: http://identity-service:8004
     depends_on:
       projects-service:
         condition: service_healthy
       notebook-service:
         condition: service_healthy
       activity-service:
+        condition: service_healthy
+      identity-service:
         condition: service_healthy
     ports:
       - "8000:8000"

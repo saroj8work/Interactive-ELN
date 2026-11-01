@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -13,6 +14,7 @@ from .router import (
     attachments_router,
     booking_router,
     inventory_router,
+    integrations_router,
     notebook_router,
     projects_router,
     search_router,
@@ -26,19 +28,22 @@ settings = GatewaySettings()
 async def lifespan(app: FastAPI):
     jwt_secret()
     app.state.service_client = ServiceClient(settings)
+    app.state.identity_client = httpx.AsyncClient(timeout=5)
     try:
         yield
     finally:
         await app.state.service_client.close()
+        await app.state.identity_client.aclose()
 
 
 app = FastAPI(title="Interactive ELN API Gateway", version="0.1.0", lifespan=lifespan)
+app.state.settings = settings
 register_domain_error_handlers(app)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
-    allow_headers=["Content-Type"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 app.include_router(projects_router)
 app.include_router(notebook_router)
@@ -48,6 +53,7 @@ app.include_router(templates_router)
 app.include_router(attachments_router)
 app.include_router(search_router)
 app.include_router(booking_router)
+app.include_router(integrations_router)
 
 
 @app.get("/api/health")

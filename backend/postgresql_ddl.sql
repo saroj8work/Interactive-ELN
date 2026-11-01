@@ -173,6 +173,10 @@ CREATE INDEX ix_project_memberships_project_id ON project_memberships (project_i
 
 CREATE INDEX ix_project_memberships_user_id ON project_memberships (user_id);
 
+CREATE INDEX ix_projects_search_document ON projects USING GIN (
+	to_tsvector('simple'::regconfig, COALESCE(name, '') || ' ' || COALESCE(description, ''))
+);
+
 
 
 -- ============================================================================
@@ -196,19 +200,36 @@ CREATE TABLE audit_events (
 	UNIQUE (event_hash)
 );
 
+CREATE TABLE storage_locations (
+	id SERIAL NOT NULL,
+	organization_id INTEGER NOT NULL,
+	parent_id INTEGER,
+	code VARCHAR(80) NOT NULL,
+	name VARCHAR(160) NOT NULL,
+	location_type VARCHAR(32) NOT NULL,
+	description TEXT NOT NULL,
+	status VARCHAR(24) NOT NULL,
+	created_by_user_id INTEGER NOT NULL,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	PRIMARY KEY (id),
+	UNIQUE (organization_id, code),
+	FOREIGN KEY(parent_id) REFERENCES storage_locations (id)
+);
+
 CREATE TABLE equipment_resources (
 	id SERIAL NOT NULL, 
 	organization_id INTEGER NOT NULL, 
 	name VARCHAR(160) NOT NULL, 
 	description TEXT NOT NULL, 
+	storage_location_id INTEGER,
 	location VARCHAR(200) NOT NULL, 
 	category VARCHAR(64) NOT NULL, 
 	status VARCHAR(24) NOT NULL, 
 	created_by_user_id INTEGER NOT NULL, 
 	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
-	PRIMARY KEY (id)
+	PRIMARY KEY (id),
+	FOREIGN KEY(storage_location_id) REFERENCES storage_locations (id)
 );
-
 CREATE TABLE experiments (
 	id SERIAL NOT NULL, 
 	organization_id INTEGER NOT NULL, 
@@ -232,13 +253,32 @@ CREATE TABLE inventory_items (
 	quantity NUMERIC(14, 3) NOT NULL, 
 	unit VARCHAR(32) NOT NULL, 
 	low_stock_threshold NUMERIC(14, 3) NOT NULL, 
+	location_id INTEGER,
 	location VARCHAR(200) NOT NULL, 
 	notes TEXT NOT NULL, 
+	custom_fields JSON NOT NULL,
 	status VARCHAR(24) NOT NULL, 
 	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
 	updated_at TIMESTAMP WITH TIME ZONE NOT NULL, 
-	PRIMARY KEY (id)
+	PRIMARY KEY (id),
+	FOREIGN KEY(location_id) REFERENCES storage_locations (id)
 );
+
+CREATE TABLE inventory_custom_field_definitions (
+	id SERIAL NOT NULL,
+	organization_id INTEGER NOT NULL,
+	name VARCHAR(120) NOT NULL,
+	field_type VARCHAR(16) NOT NULL,
+	required BOOLEAN NOT NULL,
+	options JSON NOT NULL,
+	status VARCHAR(24) NOT NULL,
+	created_by_user_id INTEGER NOT NULL,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	PRIMARY KEY (id),
+	UNIQUE (organization_id, name)
+);
+CREATE INDEX ix_inventory_custom_field_definitions_organization_id ON inventory_custom_field_definitions (organization_id);
+CREATE INDEX ix_inventory_custom_field_definitions_status ON inventory_custom_field_definitions (status);
 
 CREATE TABLE lab_tasks (
 	id SERIAL NOT NULL, 
@@ -255,6 +295,40 @@ CREATE TABLE lab_tasks (
 	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
 	updated_at TIMESTAMP WITH TIME ZONE NOT NULL, 
 	PRIMARY KEY (id)
+);
+
+CREATE TABLE workflow_rules (
+	id SERIAL NOT NULL,
+	organization_id INTEGER NOT NULL,
+	project_id INTEGER NOT NULL,
+	name VARCHAR(160) NOT NULL,
+	trigger_type VARCHAR(40) NOT NULL,
+	approval_outcome VARCHAR(16),
+	from_status VARCHAR(32),
+	to_status VARCHAR(32),
+	task_title VARCHAR(200) NOT NULL,
+	task_description TEXT NOT NULL,
+	task_priority VARCHAR(16) NOT NULL,
+	due_days INTEGER,
+	assigned_to_user_id INTEGER,
+	enabled BOOLEAN NOT NULL,
+	created_by_user_id INTEGER NOT NULL,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	PRIMARY KEY (id)
+);
+
+CREATE TABLE workflow_executions (
+	id SERIAL NOT NULL,
+	organization_id INTEGER NOT NULL,
+	rule_id INTEGER NOT NULL,
+	transition_id VARCHAR(36) NOT NULL,
+	experiment_id INTEGER NOT NULL,
+	task_id INTEGER NOT NULL,
+	executed_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	PRIMARY KEY (id),
+	UNIQUE (organization_id, rule_id, transition_id),
+	FOREIGN KEY(rule_id) REFERENCES workflow_rules (id),
+	FOREIGN KEY(task_id) REFERENCES lab_tasks (id)
 );
 
 CREATE TABLE notebook_templates (
@@ -322,14 +396,39 @@ CREATE TABLE samples (
 	sample_type VARCHAR(80) NOT NULL, 
 	external_id VARCHAR(120) NOT NULL, 
 	parent_sample_id INTEGER, 
+	storage_location_id INTEGER,
 	storage_location VARCHAR(200) NOT NULL, 
 	description TEXT NOT NULL, 
 	status VARCHAR(24) NOT NULL, 
 	created_by_user_id INTEGER NOT NULL, 
+	current_custodian_user_id INTEGER NOT NULL,
 	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
 	PRIMARY KEY (id), 
-	FOREIGN KEY(parent_sample_id) REFERENCES samples (id)
+	FOREIGN KEY(parent_sample_id) REFERENCES samples (id),
+	FOREIGN KEY(storage_location_id) REFERENCES storage_locations (id)
 );
+CREATE INDEX ix_samples_current_custodian_user_id ON samples (current_custodian_user_id);
+
+CREATE TABLE sample_custody_transfers (
+	id SERIAL NOT NULL,
+	organization_id INTEGER NOT NULL,
+	sample_id INTEGER NOT NULL,
+	from_user_id INTEGER NOT NULL,
+	to_user_id INTEGER NOT NULL,
+	status VARCHAR(16) NOT NULL,
+	request_note TEXT NOT NULL,
+	receipt_note TEXT NOT NULL,
+	requested_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	accepted_at TIMESTAMP WITH TIME ZONE,
+	PRIMARY KEY (id),
+	FOREIGN KEY(sample_id) REFERENCES samples (id)
+);
+CREATE INDEX ix_sample_custody_transfers_organization_id ON sample_custody_transfers (organization_id);
+CREATE INDEX ix_sample_custody_transfers_sample_id ON sample_custody_transfers (sample_id);
+CREATE INDEX ix_sample_custody_transfers_from_user_id ON sample_custody_transfers (from_user_id);
+CREATE INDEX ix_sample_custody_transfers_to_user_id ON sample_custody_transfers (to_user_id);
+CREATE INDEX ix_sample_custody_transfers_status ON sample_custody_transfers (status);
+CREATE UNIQUE INDEX uq_sample_custody_transfers_pending ON sample_custody_transfers (organization_id, sample_id) WHERE status = 'pending';
 
 CREATE TABLE equipment_bookings (
 	id SERIAL NOT NULL, 
@@ -340,9 +439,33 @@ CREATE TABLE equipment_bookings (
 	starts_at TIMESTAMP WITH TIME ZONE NOT NULL, 
 	ends_at TIMESTAMP WITH TIME ZONE NOT NULL, 
 	purpose VARCHAR(500) NOT NULL, 
+	source_calendar_uid VARCHAR(500), 
+	source_calendar_recurrence_id VARCHAR(40) DEFAULT '' NOT NULL, 
 	status VARCHAR(24) NOT NULL, 
 	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
 	PRIMARY KEY (id), 
+	FOREIGN KEY(equipment_id) REFERENCES equipment_resources (id)
+);
+
+CREATE TABLE equipment_maintenance (
+	id SERIAL NOT NULL,
+	organization_id INTEGER NOT NULL,
+	equipment_id INTEGER NOT NULL,
+	created_by_user_id INTEGER NOT NULL,
+	title VARCHAR(200) NOT NULL,
+	notes TEXT NOT NULL,
+	service_provider VARCHAR(200) NOT NULL,
+	service_contact_email VARCHAR(320) NOT NULL,
+	service_contact_phone VARCHAR(64) NOT NULL,
+	recurrence_days INTEGER,
+	recurrence_unit VARCHAR(8),
+	recurrence_anchor_day INTEGER,
+	recurrence_until DATE,
+	starts_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	ends_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	status VARCHAR(24) NOT NULL,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	PRIMARY KEY (id),
 	FOREIGN KEY(equipment_id) REFERENCES equipment_resources (id)
 );
 
@@ -356,6 +479,50 @@ CREATE TABLE notebook_entries (
 	updated_at TIMESTAMP WITH TIME ZONE NOT NULL, 
 	PRIMARY KEY (id), 
 	FOREIGN KEY(experiment_id) REFERENCES experiments (id)
+);
+
+CREATE TABLE experiment_approvals (
+	id SERIAL NOT NULL,
+	organization_id INTEGER NOT NULL,
+	experiment_id INTEGER NOT NULL,
+	requested_by_user_id INTEGER NOT NULL,
+	reviewer_user_id INTEGER NOT NULL,
+	reviewer_user_ids JSON NOT NULL,
+	rejection_reviewer_user_ids JSON NOT NULL,
+	review_mode VARCHAR(16) NOT NULL,
+	active_branch VARCHAR(16) NOT NULL,
+	current_step_index INTEGER NOT NULL,
+	step_history JSON NOT NULL,
+	status VARCHAR(16) NOT NULL,
+	request_comment TEXT NOT NULL,
+	decision_comment TEXT NOT NULL,
+	snapshot_digest VARCHAR(64) NOT NULL,
+	decided_by_user_id INTEGER,
+	requested_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	decided_at TIMESTAMP WITH TIME ZONE,
+	PRIMARY KEY (id),
+	FOREIGN KEY(experiment_id) REFERENCES experiments (id)
+);
+CREATE INDEX ix_experiment_approvals_organization_id ON experiment_approvals (organization_id);
+CREATE INDEX ix_experiment_approvals_experiment_id ON experiment_approvals (experiment_id);
+CREATE INDEX ix_experiment_approvals_requested_by_user_id ON experiment_approvals (requested_by_user_id);
+CREATE INDEX ix_experiment_approvals_reviewer_user_id ON experiment_approvals (reviewer_user_id);
+CREATE INDEX ix_experiment_approvals_status ON experiment_approvals (status);
+CREATE UNIQUE INDEX uq_experiment_approvals_pending ON experiment_approvals (organization_id, experiment_id) WHERE status = 'pending';
+
+CREATE TABLE entry_timestamps (
+	id SERIAL NOT NULL,
+	organization_id INTEGER NOT NULL,
+	entry_id INTEGER NOT NULL,
+	requested_by_user_id INTEGER NOT NULL,
+	tsa_url VARCHAR(500) NOT NULL,
+	record_sha256 VARCHAR(64) NOT NULL,
+	snapshot_json TEXT NOT NULL,
+	token_der BYTEA NOT NULL,
+	tsa_time TIMESTAMP WITH TIME ZONE NOT NULL,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	PRIMARY KEY (id),
+	FOREIGN KEY(entry_id) REFERENCES notebook_entries (id)
 );
 
 CREATE TABLE stock_movements (
@@ -417,6 +584,14 @@ CREATE INDEX ix_equipment_resources_organization_id ON equipment_resources (orga
 
 CREATE INDEX ix_equipment_resources_status ON equipment_resources (status);
 
+CREATE INDEX ix_equipment_resources_storage_location_id ON equipment_resources (storage_location_id);
+
+CREATE INDEX ix_storage_locations_organization_id ON storage_locations (organization_id);
+
+CREATE INDEX ix_storage_locations_parent_id ON storage_locations (parent_id);
+
+CREATE INDEX ix_storage_locations_status ON storage_locations (status);
+
 CREATE INDEX ix_experiments_name ON experiments (name);
 
 CREATE INDEX ix_experiments_organization_id ON experiments (organization_id);
@@ -430,6 +605,24 @@ CREATE INDEX ix_inventory_items_name ON inventory_items (name);
 CREATE INDEX ix_inventory_items_organization_id ON inventory_items (organization_id);
 
 CREATE INDEX ix_inventory_items_status ON inventory_items (status);
+
+CREATE INDEX ix_inventory_items_location_id ON inventory_items (location_id);
+
+CREATE INDEX ix_workflow_rules_organization_id ON workflow_rules (organization_id);
+
+CREATE INDEX ix_workflow_rules_project_id ON workflow_rules (project_id);
+
+CREATE INDEX ix_workflow_executions_experiment_id ON workflow_executions (experiment_id);
+
+CREATE INDEX ix_workflow_executions_organization_id ON workflow_executions (organization_id);
+
+CREATE INDEX ix_workflow_executions_rule_id ON workflow_executions (rule_id);
+
+CREATE INDEX ix_workflow_executions_task_id ON workflow_executions (task_id);
+
+CREATE INDEX ix_entry_timestamps_entry_id ON entry_timestamps (entry_id);
+
+CREATE INDEX ix_entry_timestamps_organization_id ON entry_timestamps (organization_id);
 
 CREATE INDEX ix_lab_tasks_assigned_to_user_id ON lab_tasks (assigned_to_user_id);
 
@@ -479,6 +672,8 @@ CREATE INDEX ix_samples_project_id ON samples (project_id);
 
 CREATE INDEX ix_samples_status ON samples (status);
 
+CREATE INDEX ix_samples_storage_location_id ON samples (storage_location_id);
+
 CREATE INDEX ix_equipment_bookings_booked_by_user_id ON equipment_bookings (booked_by_user_id);
 
 CREATE INDEX ix_equipment_bookings_ends_at ON equipment_bookings (ends_at);
@@ -492,6 +687,17 @@ CREATE INDEX ix_equipment_bookings_project_id ON equipment_bookings (project_id)
 CREATE INDEX ix_equipment_bookings_starts_at ON equipment_bookings (starts_at);
 
 CREATE INDEX ix_equipment_bookings_status ON equipment_bookings (status);
+CREATE UNIQUE INDEX uq_equipment_booking_calendar_event ON equipment_bookings (organization_id, equipment_id, source_calendar_uid, source_calendar_recurrence_id) WHERE source_calendar_uid IS NOT NULL;
+
+CREATE INDEX ix_equipment_maintenance_equipment_id ON equipment_maintenance (equipment_id);
+
+CREATE INDEX ix_equipment_maintenance_ends_at ON equipment_maintenance (ends_at);
+
+CREATE INDEX ix_equipment_maintenance_organization_id ON equipment_maintenance (organization_id);
+
+CREATE INDEX ix_equipment_maintenance_starts_at ON equipment_maintenance (starts_at);
+
+CREATE INDEX ix_equipment_maintenance_status ON equipment_maintenance (status);
 
 CREATE INDEX ix_notebook_entries_experiment_id ON notebook_entries (experiment_id);
 
@@ -508,6 +714,34 @@ CREATE INDEX ix_entry_attachments_organization_id ON entry_attachments (organiza
 CREATE INDEX ix_entry_revisions_entry_id ON entry_revisions (entry_id);
 
 CREATE INDEX ix_entry_revisions_organization_id ON entry_revisions (organization_id);
+
+CREATE INDEX ix_experiments_search_document ON experiments USING GIN (
+	to_tsvector('simple'::regconfig, COALESCE(name, '') || ' ' || COALESCE(description, ''))
+);
+
+CREATE INDEX ix_notebook_entries_search_document ON notebook_entries USING GIN (
+	to_tsvector('simple'::regconfig, COALESCE(title, '') || ' ' || COALESCE(content, ''))
+);
+
+CREATE INDEX ix_inventory_items_search_document ON inventory_items USING GIN (
+	to_tsvector('simple'::regconfig, COALESCE(name, '') || ' ' || COALESCE(category, '') || ' ' || COALESCE(catalog_number, '') || ' ' || COALESCE(lot_number, '') || ' ' || COALESCE(location, '') || ' ' || COALESCE(notes, ''))
+);
+
+CREATE INDEX ix_samples_search_document ON samples USING GIN (
+	to_tsvector('simple'::regconfig, COALESCE(name, '') || ' ' || COALESCE(external_id, '') || ' ' || COALESCE(sample_type, '') || ' ' || COALESCE(storage_location, '') || ' ' || COALESCE(description, ''))
+);
+
+CREATE INDEX ix_equipment_resources_search_document ON equipment_resources USING GIN (
+	to_tsvector('simple'::regconfig, COALESCE(name, '') || ' ' || COALESCE(location, '') || ' ' || COALESCE(category, '') || ' ' || COALESCE(description, ''))
+);
+
+CREATE INDEX ix_notebook_templates_search_document ON notebook_templates USING GIN (
+	to_tsvector('simple'::regconfig, COALESCE(name, '') || ' ' || COALESCE(description, ''))
+);
+
+CREATE INDEX ix_record_tags_search_document ON record_tags USING GIN (
+	to_tsvector('simple'::regconfig, COALESCE(tag, ''))
+);
 
 
 
@@ -543,3 +777,24 @@ CREATE INDEX ix_activity_events_occurred_at ON activity_events (occurred_at);
 CREATE INDEX ix_activity_events_organization_id ON activity_events (organization_id);
 
 CREATE INDEX ix_activity_events_source_service ON activity_events (source_service);
+
+CREATE TABLE notifications (
+	id SERIAL NOT NULL,
+	organization_id INTEGER NOT NULL,
+	user_id INTEGER NOT NULL,
+	event_id VARCHAR(36) NOT NULL,
+	title VARCHAR(200) NOT NULL,
+	message VARCHAR(500) NOT NULL,
+	entity_type VARCHAR(48) NOT NULL,
+	entity_id INTEGER NOT NULL,
+	details JSON NOT NULL,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	read_at TIMESTAMP WITH TIME ZONE,
+	PRIMARY KEY (id),
+	UNIQUE (organization_id, user_id, event_id)
+);
+CREATE INDEX ix_notifications_organization_id ON notifications (organization_id);
+CREATE INDEX ix_notifications_user_id ON notifications (user_id);
+CREATE INDEX ix_notifications_event_id ON notifications (event_id);
+CREATE INDEX ix_notifications_created_at ON notifications (created_at);
+CREATE INDEX ix_notifications_read_at ON notifications (read_at);

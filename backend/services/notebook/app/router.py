@@ -26,15 +26,27 @@ from eln_common.contracts import (
     EntryRevisionRead,
     EntryUpdate,
     EquipmentBookingCreate,
+    EquipmentBookingBatchCreate,
     EquipmentBookingRead,
     EquipmentCreate,
+    EquipmentMaintenanceCreate,
+    EquipmentMaintenanceRead,
+    EquipmentMaintenanceStatusUpdate,
+    EquipmentMaintenanceUpdate,
     EquipmentRead,
     EntryTimestampRead,
+    EntryTimestampVerificationRead,
     ExperimentCreate,
     ExperimentRead,
     ExperimentStatusUpdate,
+    ExperimentApprovalRequest,
+    ExperimentApprovalDecision,
+    ExperimentApprovalRead,
     InventoryItemCreate,
     InventoryItemRead,
+    InventoryCustomFieldDefinitionCreate,
+    InventoryCustomFieldDefinitionUpdate,
+    InventoryCustomFieldDefinitionRead,
     NotebookTemplateCreate,
     NotebookTemplateRead,
     NotebookTemplateUpdate,
@@ -43,6 +55,10 @@ from eln_common.contracts import (
     RecordSignatureCreate,
     RecordSignatureRead,
     SampleCreate,
+    SampleCustodyTransferAccept,
+    SampleCustodyTransferCreate,
+    SampleCustodyTransferRead,
+    SampleLocationUpdate,
     SampleRead,
     ResourceStatusUpdate,
     SearchHit,
@@ -53,8 +69,11 @@ from eln_common.contracts import (
     TaskStatusUpdate,
     StorageLocationCreate,
     StorageLocationRead,
+    StorageLocationUpdate,
     WorkflowRuleCreate,
+    WorkflowRuleEnabledUpdate,
     WorkflowRuleRead,
+    WorkflowRuleUpdate,
 )
 from eln_common.database import Database
 from eln_common.errors import AuthenticationError, InvalidInputError
@@ -108,6 +127,52 @@ def create_router(database: Database) -> APIRouter:
     ) -> list[EquipmentBookingRead]:
         return service.list_bookings(organization_id)
 
+    @router.get("/equipment/maintenance", response_model=list[EquipmentMaintenanceRead])
+    def list_equipment_maintenance(
+        service: Annotated[NotebookService, Depends(get_service)],
+        organization_id: Annotated[int, Header(alias="X-Organization-ID")],
+    ) -> list[EquipmentMaintenanceRead]:
+        return service.list_equipment_maintenance(organization_id)
+
+    @router.post("/equipment/{equipment_id}/maintenance", response_model=EquipmentMaintenanceRead, status_code=status.HTTP_201_CREATED)
+    def create_equipment_maintenance(
+        equipment_id: int,
+        payload: EquipmentMaintenanceCreate,
+        service: Annotated[NotebookService, Depends(get_service)],
+        actor: Annotated[tuple[int, int, bool], Depends(actor_headers)],
+    ) -> EquipmentMaintenanceRead:
+        organization_id, user_id, is_admin = actor
+        if not is_admin:
+            raise HTTPException(status_code=403, detail="Organization admin role required.")
+        return service.create_equipment_maintenance(organization_id, equipment_id, user_id, payload.model_dump())
+
+    @router.patch("/equipment/maintenance/{maintenance_id}/status", response_model=EquipmentMaintenanceRead)
+    def update_equipment_maintenance_status(
+        maintenance_id: int,
+        payload: EquipmentMaintenanceStatusUpdate,
+        service: Annotated[NotebookService, Depends(get_service)],
+        actor: Annotated[tuple[int, int, bool], Depends(actor_headers)],
+    ) -> EquipmentMaintenanceRead:
+        organization_id, user_id, is_admin = actor
+        if not is_admin:
+            raise HTTPException(status_code=403, detail="Organization admin role required.")
+        return service.update_equipment_maintenance_status(organization_id, maintenance_id, user_id, payload.status)
+
+    @router.patch("/equipment/maintenance/{maintenance_id}", response_model=EquipmentMaintenanceRead)
+    def update_equipment_maintenance(
+        maintenance_id: int,
+        payload: EquipmentMaintenanceUpdate,
+        service: Annotated[NotebookService, Depends(get_service)],
+        actor: Annotated[tuple[int, int, bool], Depends(actor_headers)],
+    ) -> EquipmentMaintenanceRead:
+        organization_id, user_id, is_admin = actor
+        if not is_admin:
+            raise HTTPException(status_code=403, detail="Organization admin role required.")
+        return service.update_equipment_maintenance(
+            organization_id, maintenance_id, user_id,
+            payload.model_dump(exclude_unset=True),
+        )
+
     @router.get("/projects/{project_id}/tasks", response_model=list[TaskRead])
     def list_tasks(
         project_id: int,
@@ -145,14 +210,53 @@ def create_router(database: Database) -> APIRouter:
             organization_id, user_id, payload.model_dump()
         )
 
+    @router.patch(
+        "/projects/{project_id}/workflow-rules/{rule_id}",
+        response_model=WorkflowRuleRead,
+    )
+    def update_workflow_rule(
+        project_id: int,
+        rule_id: int,
+        payload: WorkflowRuleUpdate,
+        service: Annotated[NotebookService, Depends(get_service)],
+        actor: Annotated[tuple[int, int, bool], Depends(actor_headers)],
+    ) -> WorkflowRuleRead:
+        organization_id, user_id, _ = actor
+        return service.update_workflow_rule(
+            organization_id, project_id, rule_id, user_id,
+            payload.model_dump(exclude_unset=True),
+        )
+
+    @router.patch(
+        "/projects/{project_id}/workflow-rules/{rule_id}/enabled",
+        response_model=WorkflowRuleRead,
+    )
+    def set_workflow_rule_enabled(
+        project_id: int,
+        rule_id: int,
+        payload: WorkflowRuleEnabledUpdate,
+        service: Annotated[NotebookService, Depends(get_service)],
+        actor: Annotated[tuple[int, int, bool], Depends(actor_headers)],
+    ) -> WorkflowRuleRead:
+        organization_id, user_id, _ = actor
+        return service.set_workflow_rule_enabled(
+            organization_id, project_id, rule_id, user_id, payload.enabled
+        )
+
     @router.get(
         "/storage-locations", response_model=list[StorageLocationRead]
     )
     def list_storage_locations(
         service: Annotated[NotebookService, Depends(get_service)],
         organization_id: Annotated[int, Header(alias="X-Organization-ID")],
+        organization_role: Annotated[str, Header(alias="X-Organization-Role")] = "member",
+        include_archived: bool = False,
     ) -> list[StorageLocationRead]:
-        return service.list_storage_locations(organization_id)
+        if include_archived and organization_role != "admin":
+            raise HTTPException(status_code=403, detail="Organization admin role required.")
+        return service.list_storage_locations(
+            organization_id, active_only=not include_archived
+        )
 
     @router.post(
         "/storage-locations",
@@ -172,6 +276,38 @@ def create_router(database: Database) -> APIRouter:
             )
         return service.create_storage_location(
             organization_id, user_id, payload.model_dump()
+        )
+
+    @router.patch(
+        "/storage-locations/{location_id}", response_model=StorageLocationRead
+    )
+    def update_storage_location(
+        location_id: int,
+        payload: StorageLocationUpdate,
+        service: Annotated[NotebookService, Depends(get_service)],
+        actor: Annotated[tuple[int, int, bool], Depends(actor_headers)],
+    ) -> StorageLocationRead:
+        organization_id, user_id, is_admin = actor
+        if not is_admin:
+            raise HTTPException(status_code=403, detail="Organization admin role required.")
+        return service.update_storage_location(
+            organization_id, user_id, location_id, payload.model_dump(exclude_unset=True)
+        )
+
+    @router.post(
+        "/storage-locations/{location_id}/status", response_model=StorageLocationRead
+    )
+    def set_storage_location_status(
+        location_id: int,
+        payload: ResourceStatusUpdate,
+        service: Annotated[NotebookService, Depends(get_service)],
+        actor: Annotated[tuple[int, int, bool], Depends(actor_headers)],
+    ) -> StorageLocationRead:
+        organization_id, user_id, is_admin = actor
+        if not is_admin:
+            raise HTTPException(status_code=403, detail="Organization admin role required.")
+        return service.set_storage_location_status(
+            organization_id, user_id, location_id, payload.status
         )
 
     @router.post(
@@ -210,6 +346,7 @@ def create_router(database: Database) -> APIRouter:
         timestamp = service.get_entry_timestamp(
             organization_id, entry_id, timestamp_id
         )
+
         certificate_path = os.getenv("ELN_TSA_CERTIFICATE_FILE", "").strip()
         if not certificate_path:
             raise HTTPException(
@@ -237,12 +374,52 @@ def create_router(database: Database) -> APIRouter:
                         "record_sha256": timestamp.record_sha256,
                         "timestamp": timestamp.tsa_time.isoformat(),
                         "verification": (
-                            "Verify timestamp.tsr against snapshot.json with "
-                            "the included explicitly pinned tsa-signer.pem."
+                            "The ELN Verify proof action checks the snapshot digest, "
+                            "token imprint, and token signature against the configured "
+                            "pinned signer certificate. For offline verification, run "
+                            "python verify_proof.py with rfc3161ng installed. The "
+                            "included certificate is the trust pin; this does not build "
+                            "or validate a public CA chain."
                         ),
                     },
                     indent=2,
                 ),
+            )
+            archive.writestr(
+                "verify_proof.py",
+                """from datetime import datetime, timezone
+from hashlib import sha256
+import json
+from pathlib import Path
+import sys
+
+from rfc3161ng import check_timestamp, get_timestamp
+
+snapshot = Path("snapshot.json").read_bytes()
+token = Path("timestamp.tsr").read_bytes()
+certificate = Path("tsa-signer.pem").read_bytes()
+proof = json.loads(Path("proof.json").read_text(encoding="utf-8"))
+digest_ok = sha256(snapshot).hexdigest() == proof["record_sha256"]
+try:
+    signature_and_imprint_ok = check_timestamp(
+        token, certificate=certificate, data=snapshot, hashname="sha256"
+    )
+    token_time = get_timestamp(token)
+    if token_time.tzinfo is None:
+        token_time = token_time.replace(tzinfo=timezone.utc)
+    stored_time = datetime.fromisoformat(proof["timestamp"])
+    if stored_time.tzinfo is None:
+        stored_time = stored_time.replace(tzinfo=timezone.utc)
+    time_ok = abs((token_time - stored_time).total_seconds()) <= 1
+except Exception as error:
+    print(f"FAIL: timestamp token verification failed ({type(error).__name__}).")
+    sys.exit(1)
+
+if not (digest_ok and signature_and_imprint_ok and time_ok):
+    print("FAIL: snapshot digest, token signature/imprint, or recorded time mismatch.")
+    sys.exit(1)
+print("PASS: snapshot digest and RFC 3161 token verified against the included signer certificate.")
+""",
             )
         return Response(
             content=proof.getvalue(),
@@ -254,6 +431,20 @@ def create_router(database: Database) -> APIRouter:
                 "X-Content-Type-Options": "nosniff",
             },
         )
+
+    @router.get(
+        "/entries/{entry_id}/timestamps/{timestamp_id}/verify",
+        response_model=EntryTimestampVerificationRead,
+    )
+    def verify_entry_timestamp(
+        entry_id: int,
+        timestamp_id: int,
+        service: Annotated[NotebookService, Depends(get_service)],
+        organization_id: Annotated[int, Header(alias="X-Organization-ID")],
+    ) -> EntryTimestampVerificationRead:
+        return EntryTimestampVerificationRead(**service.verify_entry_timestamp(
+            organization_id, entry_id, timestamp_id
+        ))
 
     @router.post(
         "/projects/{project_id}/tasks",
@@ -374,6 +565,25 @@ def create_router(database: Database) -> APIRouter:
         )
 
     @router.post(
+        "/equipment/{equipment_id}/bookings/batch",
+        response_model=list[EquipmentBookingRead],
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_bookings_batch(
+        equipment_id: int,
+        payload: EquipmentBookingBatchCreate,
+        service: Annotated[NotebookService, Depends(get_service)],
+        actor: Annotated[tuple[int, int, bool], Depends(actor_headers)],
+    ) -> list[EquipmentBookingRead]:
+        organization_id, user_id, _ = actor
+        return service.create_bookings(
+            organization_id,
+            equipment_id,
+            user_id,
+            [booking.model_dump() for booking in payload.bookings],
+        )
+
+    @router.post(
         "/bookings/{booking_id}/cancel",
         response_model=EquipmentBookingRead,
     )
@@ -405,6 +615,82 @@ def create_router(database: Database) -> APIRouter:
         organization_id, user_id, _ = actor
         return service.create_inventory_item(
             organization_id, user_id, payload.model_dump()
+        )
+
+    @router.post(
+        "/inventory/import",
+        response_model=InventoryItemRead,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def import_inventory_item(
+        payload: InventoryItemCreate,
+        service: Annotated[NotebookService, Depends(get_service)],
+        actor: Annotated[tuple[int, int, bool], Depends(actor_headers)],
+    ) -> InventoryItemRead:
+        organization_id, user_id, _ = actor
+        return service.create_inventory_item(
+            organization_id, user_id, payload.model_dump(), validate_custom_fields=False
+        )
+
+    @router.get(
+        "/inventory/custom-fields",
+        response_model=list[InventoryCustomFieldDefinitionRead],
+    )
+    def list_inventory_custom_fields(
+        service: Annotated[NotebookService, Depends(get_service)],
+        organization_id: Annotated[int, Header(alias="X-Organization-ID")],
+    ) -> list[InventoryCustomFieldDefinitionRead]:
+        return service.list_inventory_custom_fields(organization_id, active_only=False)
+
+    @router.post(
+        "/inventory/custom-fields",
+        response_model=InventoryCustomFieldDefinitionRead,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_inventory_custom_field(
+        payload: InventoryCustomFieldDefinitionCreate,
+        service: Annotated[NotebookService, Depends(get_service)],
+        actor: Annotated[tuple[int, int, bool], Depends(actor_headers)],
+    ) -> InventoryCustomFieldDefinitionRead:
+        organization_id, user_id, is_admin = actor
+        if not is_admin:
+            raise HTTPException(status_code=403, detail="Organization admin role required.")
+        return service.create_inventory_custom_field(
+            organization_id, user_id, payload.model_dump()
+        )
+
+    @router.put(
+        "/inventory/custom-fields/{field_id}",
+        response_model=InventoryCustomFieldDefinitionRead,
+    )
+    def update_inventory_custom_field(
+        field_id: int,
+        payload: InventoryCustomFieldDefinitionUpdate,
+        service: Annotated[NotebookService, Depends(get_service)],
+        actor: Annotated[tuple[int, int, bool], Depends(actor_headers)],
+    ) -> InventoryCustomFieldDefinitionRead:
+        organization_id, user_id, is_admin = actor
+        if not is_admin:
+            raise HTTPException(status_code=403, detail="Organization admin role required.")
+        return service.update_inventory_custom_field(
+            organization_id, user_id, field_id, payload.model_dump()
+        )
+
+    @router.post(
+        "/inventory/custom-fields/{field_id}/status",
+        response_model=InventoryCustomFieldDefinitionRead,
+    )
+    def set_inventory_custom_field_status(
+        field_id: int,
+        payload: ResourceStatusUpdate,
+        service: Annotated[NotebookService, Depends(get_service)],
+        actor: Annotated[tuple[int, int, bool], Depends(actor_headers)],
+    ) -> InventoryCustomFieldDefinitionRead:
+        organization_id, _, is_admin = actor
+        if not is_admin:
+            raise HTTPException(status_code=403, detail="Organization admin role required.")
+        return service.set_inventory_custom_field_status(
+            organization_id, field_id, payload.status
         )
 
     @router.get(
@@ -516,10 +802,11 @@ def create_router(database: Database) -> APIRouter:
         project_id: int,
         template_id: int,
         service: Annotated[NotebookService, Depends(get_service)],
-        organization_id: Annotated[int, Header(alias="X-Organization-ID")],
+        actor: Annotated[tuple[int, int, bool], Depends(actor_headers)],
     ) -> ExperimentRead:
+        organization_id, user_id, _ = actor
         experiment, _ = service.create_experiment_from_protocol(
-            organization_id, project_id, template_id
+            organization_id, project_id, template_id, user_id
         )
         return experiment
 
@@ -534,6 +821,89 @@ def create_router(database: Database) -> APIRouter:
         organization_id, user_id, _ = actor
         return service.create_sample(
             organization_id, user_id, payload.model_dump()
+        )
+
+    @router.get(
+        "/samples/{sample_id}/custody-transfers",
+        response_model=list[SampleCustodyTransferRead],
+    )
+    def list_sample_custody_transfers(
+        sample_id: int,
+        service: Annotated[NotebookService, Depends(get_service)],
+        organization_id: Annotated[int, Header(alias="X-Organization-ID")],
+    ) -> list[SampleCustodyTransferRead]:
+        return service.list_sample_custody_transfers(organization_id, sample_id)
+
+    @router.get(
+        "/sample-custody-transfers/pending",
+        response_model=list[SampleCustodyTransferRead],
+    )
+    def list_pending_sample_custody_transfers(
+        service: Annotated[NotebookService, Depends(get_service)],
+        actor: Annotated[tuple[int, int, bool], Depends(actor_headers)],
+    ) -> list[SampleCustodyTransferRead]:
+        organization_id, user_id, _ = actor
+        return service.list_pending_sample_custody_transfers_for_user(
+            organization_id, user_id
+        )
+
+    @router.post(
+        "/samples/{sample_id}/custody-transfers",
+        response_model=SampleCustodyTransferRead,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def request_sample_custody_transfer(
+        sample_id: int,
+        payload: SampleCustodyTransferCreate,
+        service: Annotated[NotebookService, Depends(get_service)],
+        actor: Annotated[tuple[int, int, bool], Depends(actor_headers)],
+    ) -> SampleCustodyTransferRead:
+        organization_id, user_id, _ = actor
+        return service.request_sample_custody_transfer(
+            organization_id, sample_id, user_id, payload.to_user_id, payload.request_note
+        )
+
+    @router.post(
+        "/samples/{sample_id}/custody-transfers/{transfer_id}/accept",
+        response_model=SampleCustodyTransferRead,
+    )
+    def accept_sample_custody_transfer(
+        sample_id: int,
+        transfer_id: int,
+        payload: SampleCustodyTransferAccept,
+        service: Annotated[NotebookService, Depends(get_service)],
+        actor: Annotated[tuple[int, int, bool], Depends(actor_headers)],
+    ) -> SampleCustodyTransferRead:
+        organization_id, user_id, _ = actor
+        return service.accept_sample_custody_transfer(
+            organization_id, sample_id, transfer_id, user_id, payload.receipt_note
+        )
+
+    @router.post(
+        "/samples/{sample_id}/custody-transfers/{transfer_id}/cancel",
+        response_model=SampleCustodyTransferRead,
+    )
+    def cancel_sample_custody_transfer(
+        sample_id: int,
+        transfer_id: int,
+        service: Annotated[NotebookService, Depends(get_service)],
+        actor: Annotated[tuple[int, int, bool], Depends(actor_headers)],
+    ) -> SampleCustodyTransferRead:
+        organization_id, user_id, _ = actor
+        return service.cancel_sample_custody_transfer(
+            organization_id, sample_id, transfer_id, user_id
+        )
+
+    @router.patch("/samples/{sample_id}/location", response_model=SampleRead)
+    def move_sample(
+        sample_id: int,
+        payload: SampleLocationUpdate,
+        service: Annotated[NotebookService, Depends(get_service)],
+        actor: Annotated[tuple[int, int, bool], Depends(actor_headers)],
+    ) -> SampleRead:
+        organization_id, user_id, _ = actor
+        return service.move_sample(
+            organization_id, sample_id, user_id, payload.model_dump()
         )
 
     @router.get("/projects/{project_id}/experiments", response_model=list[ExperimentRead])
@@ -553,10 +923,11 @@ def create_router(database: Database) -> APIRouter:
         project_id: int,
         payload: ExperimentCreate,
         service: Annotated[NotebookService, Depends(get_service)],
-        organization_id: Annotated[int, Header(alias="X-Organization-ID")],
+        actor: Annotated[tuple[int, int, bool], Depends(actor_headers)],
     ) -> ExperimentRead:
+        organization_id, user_id, _ = actor
         return service.create_experiment(
-            organization_id, project_id, payload.name, payload.description
+            organization_id, project_id, payload.name, payload.description, user_id
         )
 
     @router.get("/experiments/{experiment_id}/entries", response_model=list[EntryRead])
@@ -574,6 +945,70 @@ def create_router(database: Database) -> APIRouter:
         organization_id: Annotated[int, Header(alias="X-Organization-ID")],
     ) -> ExperimentRead:
         return service.get_experiment(organization_id, experiment_id)
+
+    @router.get(
+        "/experiments/{experiment_id}/approvals",
+        response_model=list[ExperimentApprovalRead],
+    )
+    def list_experiment_approvals(
+        experiment_id: int,
+        service: Annotated[NotebookService, Depends(get_service)],
+        organization_id: Annotated[int, Header(alias="X-Organization-ID")],
+    ) -> list[ExperimentApprovalRead]:
+        return service.list_experiment_approvals(organization_id, experiment_id)
+
+    @router.post(
+        "/experiments/{experiment_id}/approvals",
+        response_model=ExperimentApprovalRead,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def request_experiment_approval(
+        experiment_id: int,
+        payload: ExperimentApprovalRequest,
+        service: Annotated[NotebookService, Depends(get_service)],
+        actor: Annotated[tuple[int, int, bool], Depends(actor_headers)],
+    ) -> ExperimentApprovalRead:
+        organization_id, user_id, _ = actor
+        return service.request_experiment_approval(
+            organization_id,
+            experiment_id,
+            user_id,
+            payload.reviewer_user_ids,
+            payload.comment,
+            payload.review_mode,
+            payload.rejection_reviewer_user_ids,
+        )
+
+    @router.post(
+        "/experiment-approvals/{approval_id}/decision",
+        response_model=ExperimentApprovalRead,
+    )
+    def decide_experiment_approval(
+        approval_id: int,
+        payload: ExperimentApprovalDecision,
+        service: Annotated[NotebookService, Depends(get_service)],
+        actor: Annotated[tuple[int, int, bool], Depends(actor_headers)],
+    ) -> ExperimentApprovalRead:
+        organization_id, user_id, is_admin = actor
+        return service.decide_experiment_approval(
+            organization_id,
+            approval_id,
+            user_id,
+            is_admin,
+            payload.status,
+            payload.comment,
+        )
+
+    @router.get(
+        "/experiment-approvals/{approval_id}",
+        response_model=ExperimentApprovalRead,
+    )
+    def get_experiment_approval(
+        approval_id: int,
+        service: Annotated[NotebookService, Depends(get_service)],
+        organization_id: Annotated[int, Header(alias="X-Organization-ID")],
+    ) -> ExperimentApprovalRead:
+        return service.get_experiment_approval(organization_id, approval_id)
 
     @router.patch("/experiments/{experiment_id}/status", response_model=ExperimentRead)
     def update_experiment_status(
@@ -596,10 +1031,11 @@ def create_router(database: Database) -> APIRouter:
         experiment_id: int,
         payload: EntryCreate,
         service: Annotated[NotebookService, Depends(get_service)],
-        organization_id: Annotated[int, Header(alias="X-Organization-ID")],
+        actor: Annotated[tuple[int, int, bool], Depends(actor_headers)],
     ) -> EntryRead:
+        organization_id, user_id, _ = actor
         return service.create_entry(
-            organization_id, experiment_id, payload.title, payload.content
+            organization_id, experiment_id, payload.title, payload.content, user_id
         )
 
     @router.put("/entries/{entry_id}", response_model=EntryRead)

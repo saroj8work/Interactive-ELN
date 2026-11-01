@@ -72,3 +72,57 @@ class CurrentUserRead(BaseModel):
     display_name: str
     organization_id: int
     role: Literal["admin", "member"]
+
+
+class ApiCredentialCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    scopes: list[Literal["read", "write"]] = Field(min_length=1, max_length=2)
+
+
+class ApiCredentialRead(BaseModel):
+    id: int
+    name: str
+    token_prefix: str
+    scopes: list[Literal["read", "write"]]
+    created_at: datetime
+    last_used_at: datetime | None
+    revoked_at: datetime | None
+
+
+class ApiCredentialCreated(ApiCredentialRead):
+    secret: str
+
+
+class ApiCredentialPrincipal(BaseModel):
+    user_id: int
+    organization_id: int
+    role: Literal["admin", "member"]
+    scopes: list[Literal["read", "write"]]
+
+
+class CalendarFeedCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
+class CalendarFeedRead(BaseModel):
+    id: int
+    name: str
+    token_prefix: str
+    created_at: datetime
+    last_used_at: datetime | None
+    revoked_at: datetime | None
+
+
+class CalendarFeedCreated(CalendarFeedRead):
+    secret: str
+
+
+class CalendarFeedAuthenticate(BaseModel):
+    feed_id: int = Field(gt=0)
+    secret: str = Field(min_length=32, max_length=160)
+
+
+class CalendarFeedPrincipal(BaseModel):
+    feed_id: int
+    user_id: int
+    organization_id: int

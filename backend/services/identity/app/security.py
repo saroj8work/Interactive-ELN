@@ -80,6 +80,7 @@ class Principal:
     user_id: int
     organization_id: int
     role: str
+    scopes: frozenset[str] | None = None
 
 
 def get_principal(request: Request) -> Principal:

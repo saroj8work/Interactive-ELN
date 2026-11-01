@@ -57,6 +57,9 @@ class GatewaySettings:
     activity_service_url: str = os.getenv(
         "ACTIVITY_SERVICE_URL", "http://activity-service:8003"
     ).rstrip("/")
+    identity_service_url: str = os.getenv(
+        "IDENTITY_SERVICE_URL", "http://127.0.0.1:8004"
+    ).rstrip("/")
 
     def url_for(self, service: ServiceName) -> str:
         services = {

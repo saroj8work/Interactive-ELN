@@ -17,6 +17,20 @@ class ProjectService:
     ) -> list[Project]:
         return self._repository.list_accessible(organization_id, user_id, is_admin)
 
+    def search_projects(
+        self,
+        organization_id: int,
+        user_id: int,
+        is_admin: bool,
+        query: str,
+    ) -> list[Project]:
+        normalized = query.strip()
+        if len(normalized) < 2 or len(normalized) > 100:
+            raise InvalidInputError("Search query must contain between 2 and 100 characters.")
+        return self._repository.search_accessible(
+            organization_id, user_id, is_admin, normalized
+        )
+
     def get_project(
         self, organization_id: int, project_id: int, user_id: int, is_admin: bool
     ) -> Project:
@@ -76,7 +90,9 @@ class ProjectService:
     def list_members(
         self, organization_id: int, project_id: int, user_id: int, is_admin: bool
     ) -> list[ProjectMembership]:
-        self._require_manager(organization_id, project_id, user_id, is_admin)
+        # Project collaborators need the member list to route review work and
+        # understand shared access; only mutations remain manager restricted.
+        self.project_access(organization_id, project_id, user_id, is_admin)
         return self._repository.list_members(organization_id, project_id)
 
     def set_member(

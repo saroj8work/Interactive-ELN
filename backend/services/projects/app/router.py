@@ -38,6 +38,15 @@ def create_router(database: Database) -> APIRouter:
         organization_id, user_id, is_admin = actor
         return service.list_projects(organization_id, user_id, is_admin)
 
+    @router.get("/search", response_model=list[ProjectRead])
+    def search_projects(
+        query: str,
+        service: Annotated[ProjectService, Depends(get_service)],
+        actor: Annotated[tuple[int, int, bool], Depends(actor_headers)],
+    ) -> list[ProjectRead]:
+        organization_id, user_id, is_admin = actor
+        return service.search_projects(organization_id, user_id, is_admin, query)
+
     @router.get("/{project_id}", response_model=ProjectRead)
     def get_project(
         project_id: int,

@@ -1,55 +1,119 @@
-# Remaining ELN Parity Work: Handoff Status
+# ELN Parity Work Status
 
-This note records the state reached when implementation was paused at the user's request. The work below is partial and has not been validated; it is not a feature-completion or regulatory-compliance claim.
+## Current work state
 
-## Scope clarification
+Status reviewed 2026-11-01. First-pass features now include recipient-confirmed sample custody handoffs, molecule drawing with editable JSON and MDL V2000 import/export, formal charge support with common charged-valence checks, V2000 single-bond stereo markers, common-subset SMILES import/export, simple atom/bond validation and aromatic-bond support, read-only calendar feeds plus one-time `.ics` booking import, four Notebook workflow triggers with outcome-filtered approval task branches and optional task assignment, sequential and parallel snapshot-bound experiment approvals with conditional rejection paths and a durable in-app notification inbox, editable recurring equipment maintenance with day/week/month intervals, provider contacts and end dates, English/Hindi shell, dashboard, workflow-panel, molecule-editor, and equipment-scheduler text, eLabFTW-compatible experiment, inventory, and project-sample CSV import with editable organization-managed typed inventory field schemas, organization-managed outbound webhooks, and timestamp proof verification. Their outstanding limitations and validation state are listed below. The Activity migration chain is at `f4c8a1d29e63`; the local Activity database was upgraded to that head.
 
-Interactive ELN is intended to be a compatible product with general ELN capabilities, not an exact SciNote or eLabFTW replacement. Implement general needs first. Track vendor-specific formats and behavior as future work rather than guessing at undocumented proprietary formats. In particular, SciNote's public material mentions `.eln` protocol-template files, but this work did not establish their schema. The ELN Consortium/eLabFTW `.eln` RO-Crate is a documented interchange format and was selected as the standards-based import target.
 
-Regulatory controls and certification remain out of scope.
 
-## Work started in the working tree
+Interactive ELN is an independent, PostgreSQL-backed ELN that implements general laboratory workflows. It is not intended to clone SciNote or eLabFTW, share their databases, or claim regulatory certification. Vendor-specific functionality and undocumented formats are future compatibility work.
 
-- `backend/services/notebook/app/models.py`
-  - Added models for hierarchical storage locations, workflow rules/executions, and RFC 3161 entry timestamp records.
-  - Added nullable structured-location foreign keys to inventory, sample, and equipment records.
-- `backend/eln_common/contracts.py`
-  - Added contracts for locations, workflow rules, and entry timestamps.
-  - Added optional structured-location IDs to inventory, sample, and equipment payloads.
-- `backend/services/notebook/app/service.py`
-  - Began creating a task when an experiment status transition matches a configured project workflow rule.
-  - Began validating structured locations on inventory, sample, and equipment creation.
-  - Began RFC 3161 timestamp creation and timestamp record retrieval using a configured endpoint and pinned signer certificate.
-- `backend/services/notebook/app/router.py`
-  - Added internal notebook-service routes for workflow rules, storage locations, timestamp records, and timestamp proof ZIP downloads.
-- `backend/gateway/app/router.py`
-  - Added gateway proxy routes for workflow rules, storage locations, and timestamp records/proofs.
-- `backend/gateway/app/eln_import.py`
-  - Added an initial RO-Crate parsing helper that attempts to map text records, keywords, and referenced files into the existing project import contracts.
-  - This helper is **not yet connected** to the existing project import endpoint.
-- `docs/remaining-parity-implementation-status.md`
-  - This handoff note.
 
-## Not implemented or not finished
 
-- The RO-Crate importer is not wired into the import endpoint. Vendor-specific SciNote `.eln` parsing is not implemented.
-- No Alembic migration has been added for the new notebook tables and columns. Do not deploy the new model code until a migration is created and applied.
-- `rfc3161ng` is imported by the notebook service but has not been added to the Python dependency manifest or installed. Its runtime APIs and proof verification flow have not been tested.
-- The TSA environment variables and operational setup have not been added to `.env.example`, Compose, or the migration/design documentation.
-- Structured locations do not yet have frontend management/selection UI; legacy free-text locations remain in the existing UI.
-- Workflow rules do not yet have frontend management UI.
-- Timestamp creation/list/download controls do not yet have frontend UI.
-- Scientific document authoring/rendering tools (for example, math notation and chemical structures) have not been implemented.
-- README parity claims and vendor-specific follow-up documentation have not been updated for these partial changes.
-- No tests, builds, migration rendering, or type checks have been run after these edits. Treat all new code as unverified.
+## Implemented general capabilities
 
-## Suggested resume sequence
 
-1. Inspect the current working tree and resolve any type, import, or model issues in the partial changes.
-2. Add and validate a notebook Alembic migration before running services.
-3. Finish and test the RO-Crate importer, including hostile ZIP paths, archive size limits, attachment mapping, and malformed metadata; connect it to the existing import endpoint.
-4. Add the RFC 3161 dependency/configuration, verify the library's exact token and timestamp APIs, and test failure paths and offline proof contents before documenting operational trust assumptions.
-5. Complete the frontend surfaces for locations, workflow rules, timestamps, and scientific writing tools.
-6. Update the README/design documentation to distinguish implemented general capabilities from vendor-specific follow-up and run focused backend/frontend validation.
 
-No regulated certification or compliance claim should be made based on this work.
+- Project-scoped automation rules trigger task creation on configured experiment status transitions, experiment creation, notebook entry creation, and terminal approval-sequence outcomes (approved, rejected, or stale). Project editors can edit rules and pause/resume them while preserving execution history. Experiments can also be submitted to an active project member or organization admin for approval; reviewers or organization admins can approve/reject, and a snapshot digest prevents completion against changed notebook content. A durable in-app inbox notifies the first reviewer, each subsequent reviewer, and the requester about final approval, rejection, or stale requests. Email and push notifications are not included. This remains a first-pass review flow, not a general-purpose workflow engine.
+- Equipment maintenance can be scheduled and moved through scheduled, in-progress, completed, and cancelled states. Records can include provider contacts and day-, week-, or month-based recurrence with an end date; monthly schedules retain their original day-of-month when shorter months are skipped. Completing a recurring occurrence schedules the next window while preserving booking-conflict protection. Maintenance history is retained. Active maintenance windows block overlapping bookings, maintenance cannot overlap reserved bookings or another active maintenance window, and equipment cannot be archived while reservations or maintenance remain active.
+- Upcoming equipment bookings and scheduled/in-progress maintenance can be exported as a standards-based iCalendar `.ics` file or served through revocable, read-only subscription feeds that calendar applications can refresh. The feed token is stored as a hash and can be revoked. Downloaded calendars and subscribed feeds use the same organization-scoped event UIDs, and both escape text fields for iCalendar output. Users can also import active `.ics` events as bookings for a selected equipment item, project, and time zone; RFC RRULE series expand to a maximum of 100 bookings per import, and the gateway checks for overlaps with existing bookings, maintenance, and other imported events. The importer supports UTC, IANA TZID, date-only, and floating local times. EXDATE/RDATE recurrence exceptions and recurrence overrides are rejected; ongoing event updates, cancellation propagation, and provider-specific OAuth/CalDAV management remain future work.
+
+- Hierarchical storage locations can be created, edited, archived/restored, and assigned to inventory, samples, and equipment while preserving existing free-text location fields. The lifecycle blocks archiving locations with active child locations or active assigned resources, prevents hierarchy cycles, and scopes admin operations to the organization.
+
+- Samples can be moved between structured or free-text locations, with a timeline of moves containing the prior and destination locations, actor, and timestamp. Every sample also has a recorded custodian. The current custodian can request a handoff to an active organization member; only the named recipient can accept it, adding a receipt note and updating custody. Only one handoff can be pending per sample; the sender can cancel it, and archiving also cancels it. Requests, acceptances, and cancellations appear in the sample activity history and notify the recipient or prior custodian through the in-app inbox. This first pass records the custody chain in the Notebook database and Activity outbox; it is not a validated regulatory control.
+- Sample lineage can be recorded when registering a derived sample. Children inherit or retain the parent's project, archived samples cannot be used as parents, and a sample with active derived samples cannot be archived. The UI displays parent and child relationships using the existing `parent_sample_id` column; no new database migration was needed.
+
+- Notebook entry content can render inline and block LaTeX math.
+- Notebook entries support mouse, pen, or touch freehand sketches saved as PNG attachments using the existing access-controlled attachment pipeline.
+
+- RFC 3161 timestamp requests are available when the deployment supplies an HTTPS TSA URL and a pinned TSA signer certificate. The service stores the snapshot, digest, signed token, and TSA time, and provides a proof ZIP download.
+
+- The project import endpoint accepts the app's own JSON/ZIP format, a supported subset of ELN Consortium RO-Crate `.eln` records, and eLabFTW-compatible CSV imports in experiment, inventory-resource, or project-sample mode. CSV sample rows map title/name, type/category, external ID, parent_external_id, location, description/body, metadata, tags, and additional columns to existing sample fields, and are assigned to the selected project. Parent references resolve by external ID to another imported row or a unique active sample in the selected project or organization scope; missing, ambiguous, archived, and cyclic parent references are rejected before writes. CSV inventory mode maps title, category, stock quantity/unit, location, notes, tags, and extra columns/metadata into persisted custom fields. Organization admins can create, edit, archive, and restore required text, number, date, boolean, and select fields, which are shown on manual inventory entry and validated by the service. Renames update existing inventory values; type and select-option changes are checked against stored values before saving, while required status applies to future inventory entries. CSV has no attachment payload; supported `.eln` archives reconstruct entry attachments. Vendor field schemas/templates, permissions, and ownership are not reconstructed. Sample CSV import reuses the existing schema and needs no migration; representative vendor exports and import behavior still need validation.
+
+- Users can create read/write API credentials, see the secret only at creation time, list/revoke their own keys, and authenticate gateway requests with those keys. Identity stores only a SHA-256 digest and checks active organization membership when the gateway resolves a key.
+- Organization admins can configure outgoing HTTPS webhooks for all events or selected `source.action` types. The Activity service queues matching events durably, signs request bodies with HMAC-SHA256, retries failed deliveries, and exposes delivery history. Signing secrets are encrypted at rest with a stable deployment key and shown only on creation or rotation. OAuth connections, inbound webhooks, and provider-specific connectors are not included.
+
+- PostgreSQL full-text matching is connected through the gateway for accessible projects and across experiments, entries, inventory, samples, equipment, templates, and tags. SQLite test fixtures retain substring matching.
+
+
+
+These capabilities are intentionally scoped and do not represent the full feature sets of commercial products. Full-text query behavior and GIN indexes are implemented. A first-pass 2D molecule editor supports drawing, common-element valence/duplicate-bond checks, aromatic bonds, formal charges, MDL V2000 single-bond wedge/either/down marker import/export and display, and a common SMILES subset; it does not assign R/S configurations, interpret stereochemical context, validate stereochemistry, or handle double-bond E/Z markers. Broader chemical structure editing and formats remain future work. Read-only live calendar feeds are implemented; bidirectional sync and provider-specific account connections remain future work. Workflow support includes task generation from four Notebook events, sequential and unanimous parallel snapshot-bound approval paths, conditional sequential rejection paths, approval-outcome task branches, and a durable in-app notification inbox for approval events; email/push notifications remain future work. Localization beyond the English/Hindi workspace/dashboard/workflow-panel slice remains future work. User-managed API credentials and organization-managed outbound webhooks are implemented as separate integration mechanisms; OAuth and provider-specific connectors remain future work. Import supports the app bundle, a subset of ELN Consortium RO-Crate, and eLabFTW-compatible CSV rows mapped to experiments/entries, inventory resources, or samples assigned to a selected project with editable typed inventory fields; vendor custom-field/template schemas are not reconstructed. SciNote-specific protocol-template import has not been implemented because its proprietary schema has not been verified. eLabFTW uses MySQL; its application database is not compatible with this PostgreSQL service architecture.
+
+
+
+RFC 3161 tokens provide cryptographic evidence only when the configured TSA and signer-certificate trust are appropriately managed. The timestamp records and proof ZIPs are not immutable against database administrators and do not establish 21 CFR Part 11, GLP, or GMP compliance. Regulatory controls remain out of scope.
+
+
+
+## Schema/migration status
+
+
+
+Migration heads verified for the local databases: Identity `bf64813e5d27`; Projects `c6b42e91a307`; Notebook `7b3e9c2d5a14`; Activity `f4c8a1d29e63`.
+
+
+
+PostgreSQL full-text search indexes are versioned in Projects revision `c6b42e91a307` and Notebook revision `b19e6f4c82ad`. Equipment maintenance is versioned in Notebook revision `f45c0b724a1e`; workflow event triggers are versioned in `a71c46d20b93`; maintenance providers and recurrence intervals are versioned in `c31ad9e5b204`; provider contact details and recurrence end dates are versioned in `d4e8b1c0a632`; workflow task assignment is versioned in `e5b7c2d9104f`; day/week/month recurrence is versioned in `f2a6c9d1843e`; inventory custom-field storage is versioned in `a6c8f912e4b7`; organization-managed typed inventory field schemas are versioned in `b7d4e2a19c63`; snapshot-bound experiment approval reviews are versioned in `c2f19a6d7e40`; sequential approval reviewers and per-step history are versioned in `d7b2c3e91a45`; parallel approval mode is versioned in `e8f6c2a1b940`; approval outcome task branches are versioned in `f3a9c1d6b8e2`; conditional rejection paths are versioned in `8c2d7f1a6b40`. The Notebook database is at the latest revision locally (`7b3e9c2d5a14`). Sample lineage uses the existing `parent_sample_id` column; recipient-confirmed sample custody is versioned in Notebook revision `7b3e9c2d5a14`.
+
+
+
+The Projects migration chain is `4389fc7b4469` (initial schema) followed by `c6b42e91a307` (project full-text GIN index).
+
+
+
+The Identity migration chain now ends with `bf64813e5d27` (revocable read-only calendar feed tokens), following API credentials revision `d53f812b147a`.
+
+The Activity migration chain now ends with `f4c8a1d29e63` (durable user notifications), following `e03d8c1f6a42` (webhook event type length adjustment), `d24f87c3b1a0` (organization webhook endpoints and durable delivery queue), and initial revision `3a3ec5e04473`.
+
+
+The Notebook migration chain is:
+
+
+
+1. `11ce01f7549b` - initial Notebook schema.
+
+2. `22df83a21bc9` - storage locations, workflow rules, and timestamp records.
+
+3. `b19e6f4c82ad` - PostgreSQL full-text GIN indexes for Notebook search.
+4. `f45c0b724a1e` - equipment maintenance scheduling and lifecycle records.
+5. `a71c46d20b93` - experiment-created and entry-created workflow triggers; status destination becomes optional for these trigger types.
+6. `c31ad9e5b204` - equipment maintenance service providers and recurrence intervals.
+7. `d4e8b1c0a632` - provider contact details and recurrence end dates for maintenance plans.
+8. `e5b7c2d9104f` - optional assignee for tasks created by workflow rules.
+9. `f2a6c9d1843e` - day, week, and month recurrence units for equipment maintenance.
+10. `a6c8f912e4b7` - inventory custom-field storage for resource imports.
+11. `b7d4e2a19c63` - organization-managed inventory field definitions, types, options, and required-field metadata.
+12. `c2f19a6d7e40` - assigned experiment approval reviews with snapshot digests and one-pending-request protection.
+13. `d7b2c3e91a45` - ordered reviewer sequences and preserved per-step decision history for experiment approvals.
+14. `e8f6c2a1b940` - parallel all-reviewers approval mode with sequential mode retained for existing requests.
+15. `f3a9c1d6b8e2` - optional approved/rejected/stale outcome conditions for approval-ended workflow rules.
+16. `8c2d7f1a6b40` - optional sequential reviewer path activated when the main approval path is rejected.
+17. `7b3e9c2d5a14` - recorded sample custodian and recipient-confirmed custody handoffs.
+
+
+An invalid duplicate file named `001_initial_schema.py` was removed because it was malformed and defined a second initial revision. The chain has one head. `backend/postgresql_ddl.sql` now includes the search indexes and the structured sample location column. Per-service Alembic migrations remain authoritative.
+
+
+
+## Validation and rollout status
+
+The last recorded broad validation on 2026-10-17 passed the backend suite (54 passed, 1 warning), PostgreSQL migration rendering, and frontend TypeScript/Vite production builds for an earlier feature set. It also verified the then-current database heads and local service health. Since that snapshot, formal-charge, stereo-marker, SMILES, molecule-editor localization, equipment-panel localization, sample CSV import, calendar UID/text-escaping changes, one-time `.ics` booking import, and transactional booking batch creation, the calendar feed UI/API, expanded workflow triggers and assignment, sequential and parallel approval reviews, approval-outcome task branches, recurring maintenance, localization, CSV import, external webhook feature, editable typed inventory custom-field schemas, and the approval notification inbox were added or changed. Notebook and gateway OpenAPI schemas generate with reviewer-sequence and per-step history fields, confirm sequential, parallel, and conditional rejection-path fields, sample custody routes and response schemas, all four workflow trigger values, and the parallel cancellation status; Activity and gateway OpenAPI generation confirms notification routes; Notebook and gateway OpenAPI generation confirms the custom-field update routes and approval-outcome branch filter. **The latest changes have not yet been build- or regression-validated.** OpenAPI generation confirms Gateway and Notebook custody routes and request/read schemas; a local database query found no samples missing a migrated custodian and confirmed the transfer table exists. The new custody flow has not been exercised end to end. The molecule charge, stereo-marker, SMILES, and localization changes, including the equipment-panel localization slice, have not been build- or regression-validated. Notebook migrations through `7b3e9c2d5a14` and Activity migration `f4c8a1d29e63` are applied locally. A repeated host probe on 2026-11-01 found the gateway and service health endpoints on ports 8000–8004 unreachable; Docker Compose status could not be inspected because the Docker CLI is unavailable in this environment.
+
+## Remaining parity work
+
+The list below tracks eight feature areas discussed for SciNote/eLabFTW-inspired workflows. Recipient-confirmed sample custody is also implemented as a cross-cutting sample lifecycle improvement; its migration is applied locally, but its end-to-end flow still needs validation. It is not a count of eight wholly unimplemented features: several have first-pass implementations. Completing this list does not by itself establish vendor parity, production readiness, or regulatory compliance.
+
+1. **Molecule editing - editable JSON, common-element valence checks, duplicate-bond checks, aromatic V2000 bonds, formal charges, single-bond stereo markers, and a common SMILES subset implemented.** The editor attaches SVG plus editable JSON, loads/saves JSON, and imports/exports MDL V2000 MOL/SDF structures including atom charge codes, M CHG properties, and single-bond stereo codes 1 (wedge), 4 (either), and 6 (down/hash). SMILES import/export covers organic-subset atoms, bracket atoms with formal charges and explicit hydrogen counts, branches, ring closures, single/double/triple/aromatic bonds, and disconnected components. Isotopes, atom maps, stereochemical `@` and directional bond markers, and nonstandard extensions are not supported; export is disabled while bond stereo markers are present to avoid losing them. Aromaticity perception, stereochemical interpretation/validation, and richer chemical formats remain. No database migration is required. These UI changes are not build-validated.
+2. **Calendar integration - read-only feeds and one-time `.ics` event import implemented.** Downloaded `.ics` files and live feeds share stable organization-scoped event UIDs, preventing duplicate entries when users use both export paths. Text values are escaped and control characters removed. Users can import active VEVENT records as bookings for one equipment item and optional project, with UTC/TZID/date-only/floating time handling, RRULE expansion capped at 100 bookings, conflict preflight, and a Notebook transaction that saves the batch atomically. EXDATE/RDATE exceptions and recurrence overrides are rejected; cancellation propagation, event update sync, provider-managed OAuth/CalDAV, and idempotent re-import remain. The import and export changes have not been build- or regression-validated.
+3. **Workflow automation - four task-generation triggers, outcome-filtered approval task branches, optional task assignment, sequential and parallel snapshot-bound approvals, conditional sequential rejection paths, and durable in-app approval notifications implemented.** Rules run on experiment creation, notebook entry creation, experiment status changes, and approval sequences ending as approved, rejected, or stale. Approval-ended rules can match any outcome or branch on approved, rejected, or stale, allowing each outcome to create a different configured task. Generated tasks can be left unassigned or assigned to an active organization member. Project editors can select one to ten active project members or organization admins. Sequential mode requires each reviewer to approve in configured order; an optional ordered rejection path starts if any main-path reviewer rejects, and uses the same snapshot digest. Parallel mode notifies every reviewer at once, requires every reviewer to approve, and ends on the first rejection. Each review records its reviewer, decision, comment, and timestamp; changed content invalidates all outstanding decisions, and experiment completion requires approval of the same experiment, entry, tag, and attachment snapshot. The first reviewer, next reviewer, and requester receive inbox notifications in sequential mode; parallel mode notifies all reviewers and then the requester with the final outcome. Email/push delivery remain future work. Approval data is versioned in Notebook revisions `c2f19a6d7e40`, `d7b2c3e91a45`, `e8f6c2a1b940`, and `8c2d7f1a6b40`; outcome-filtered task branches are versioned in `f3a9c1d6b8e2`; notifications are versioned in Activity revision `f4c8a1d29e63`. Approval and sample-custody migrations are applied locally; run service migrations before deployment.
+4. **Localization - English/Hindi shell, dashboard, workflow panel, molecule editor, and equipment scheduler controls implemented.** The equipment panel now translates its calendar subscriptions, equipment registration, booking and maintenance forms, record status/actions, and notices. API-provided error text, embedded resource-tag editing, and other detailed panels still need translation coverage. Recent molecule and equipment translations are not build-validated; localization work is paused here while the remaining product features are addressed.
+5. **Import support - app bundles, a supported RO-Crate subset, and eLabFTW-compatible experiment/resource/project-sample CSV imports implemented.** CSV sample rows are assigned to the selected project and map names, type/category, external ID, parent_external_id, location, description/body, metadata, tags, and additional columns. Parent links resolve within the CSV or to a unique active sample in the selected project or organization scope, with missing/ambiguous references and cycles rejected. CSV resources map tags, quantity, unit, category, location, notes, and other columns into persisted custom fields. Organization admins can create, edit, archive, and restore typed inventory fields with required validation and select options for manual entry. Renames preserve existing values; type and select-option changes are checked against existing inventory data, and required status applies to new inventory entries. These schema edits reuse existing columns and require no migration. CSV does not carry attachment bytes; supported `.eln` archives restore entry attachments. Importing vendor custom-field schemas/templates, broader RO-Crate structures, and SciNote-native import remain. Sample lineage mappings and vendor CSV formats need representative exported files for validation; the sample import has not been build- or regression-validated.
+6. **External integrations - outbound webhooks implemented as a first pass.** Validate the latest UI/API and delivery worker. OAuth, managed third-party credentials, inbound webhooks, and provider-specific connectors remain.
+7. **Equipment maintenance - editable lifecycle, provider contacts, and bounded day/week/month recurrence implemented.** Monthly recurrence keeps the original day when a month is shorter, and completing an occurrence checks booking/maintenance conflicts before scheduling the next one. The required migrations are applied locally; this feature has not been regression-validated.
+8. **Timestamp proof verification - first pass implemented.** The UI calls a verifier that checks the snapshot digest, RFC 3161 token signature/imprint against the configured pinned signer certificate, and stored timestamp. Proof ZIPs include an offline verification script. Validate the feature and TSA configuration in deployment; public CA chain validation and revocation checking are not implemented.
+
+### Cross-cutting follow-up
+
+- Run the frontend TypeScript and production build, backend regression suite, and service startup checks against the current code before treating these first passes as validated. These broader checks have not been run for the latest feature set.
+- Review webhook outbound-network policy and production secret handling; configure and back up a stable `ELN_WEBHOOK_ENCRYPTION_KEY` and apply deployment egress controls.
+- Review migration heads and backup/restore procedures as part of deployment readiness. Compliance validation is intentionally deferred until after feature work and is not included in this parity list.
