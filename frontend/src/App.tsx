@@ -38,6 +38,7 @@ import { WorkflowDagCanvas } from "./WorkflowDagCanvas";
 import { BarcodeScannerModal } from "./BarcodeScannerModal";
 import { FormalReportView } from "./FormalReportView";
 import { ChemicalSearchModal } from "./ChemicalSearchModal";
+import { LandingPage } from "./LandingPage";
 import { formatLocaleDate, formatLocaleDateOnly, getSavedLocale, saveLocale, translate, type Locale } from "./i18n";
 
 function formatDate(value: string): string {
@@ -115,10 +116,10 @@ function exportEquipmentCalendar(
   const lines = [
     "BEGIN:VCALENDAR",
     "VERSION:2.0",
-    "PRODID:-//Interactive ELN//Equipment Schedule//EN",
+    "PRODID:-//Aura Lab//Equipment Schedule//EN",
     "CALSCALE:GREGORIAN",
     "METHOD:PUBLISH",
-    "X-WR-CALNAME:Interactive ELN Equipment Schedule",
+    "X-WR-CALNAME:Aura Lab Equipment Schedule",
     ...events.flatMap((event) => [
       "BEGIN:VEVENT",
       `UID:${event.uid}`,
@@ -876,10 +877,10 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark">
-            <img src="/app-icon.jpg" alt="Interactive ELN" />
+            <img src="/app-icon.jpg" alt="Aura Lab" />
           </div>
           <div>
-            <strong>Interactive ELN</strong>
+            <strong>Aura Lab</strong>
             <span>{t("Research workspace")}</span>
           </div>
         </div>
@@ -1924,8 +1925,10 @@ function ScientificSketchPad({
 
 function AuthScreen({
   onLogin,
+  onBackToLanding,
 }: {
   onLogin: (organization: string, email: string, password: string) => Promise<void>;
+  onBackToLanding?: () => void;
 }) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -1964,10 +1967,19 @@ function AuthScreen({
   return (
     <main className="auth-page">
       <form className="auth-card" onSubmit={submit}>
+        {onBackToLanding && (
+          <button
+            className="auth-back-link"
+            type="button"
+            onClick={onBackToLanding}
+          >
+            &larr; Return to Aura Lab Overview
+          </button>
+        )}
         <div className="brand-mark">
-            <img src="/app-icon.jpg" alt="Interactive ELN" />
+            <img src="/app-icon.jpg" alt="Aura Lab" />
           </div>
-        <p className="eyebrow">INTERACTIVE ELN</p>
+        <p className="eyebrow">AURA LAB</p>
         <h1>{recoveryMode ? "Reset your password" : "Welcome back"}</h1>
         <p className="auth-copy">
           {recoveryMode
@@ -2073,9 +2085,9 @@ function PasswordResetScreen() {
     <main className="auth-page">
       <form className="auth-card" onSubmit={(event) => void submit(event)}>
         <div className="brand-mark">
-            <img src="/app-icon.jpg" alt="Interactive ELN" />
+            <img src="/app-icon.jpg" alt="Aura Lab" />
           </div>
-        <p className="eyebrow">INTERACTIVE ELN</p>
+        <p className="eyebrow">AURA LAB</p>
         <h1>Choose a new password</h1>
         {complete ? (
           <>
@@ -2135,7 +2147,7 @@ function AcceptInvitationScreen() {
     <main className="auth-page">
       <form className="auth-card" onSubmit={submit}>
         <div className="brand-mark">
-            <img src="/app-icon.jpg" alt="Interactive ELN" />
+            <img src="/app-icon.jpg" alt="Aura Lab" />
           </div>
         <p className="eyebrow">ORGANIZATION INVITATION</p>
         <h1>Join your research team</h1>
@@ -4473,6 +4485,10 @@ function WorkflowRulesPanel({
 export default function App() {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [ready, setReady] = useState(false);
+  const [showLogin, setShowLogin] = useState(() => {
+    const search = typeof window !== "undefined" ? window.location.search : "";
+    return search.includes("login") || search.includes("organization");
+  });
   const isInvitationPage = window.location.pathname === "/accept-invitation";
   const isPasswordResetPage = new URLSearchParams(
     window.location.hash.slice(1),
@@ -4523,6 +4539,11 @@ export default function App() {
   if (isInvitationPage) return <AcceptInvitationScreen />;
   if (isPasswordResetPage) return <PasswordResetScreen />;
   if (!ready) return <main className="auth-page"><p className="auth-copy">Checking your session…</p></main>;
-  if (!user) return <AuthScreen onLogin={login} />;
+  if (!user) {
+    if (!showLogin) {
+      return <LandingPage onOpenLogin={() => setShowLogin(true)} />;
+    }
+    return <AuthScreen onLogin={login} onBackToLanding={() => setShowLogin(false)} />;
+  }
   return <NotebookApp user={user} onLogout={() => void logout()} />;
 }
