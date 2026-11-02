@@ -39,13 +39,60 @@ export function setAccessToken(token: string | null): void {
   accessToken = token;
 }
 
+
+export function getFriendlyApiErrorMessage(status: number, detail?: string): string {
+  if (detail && typeof detail === "string") {
+    const trimmed = detail.trim();
+    if (
+      trimmed.length > 0 &&
+      trimmed.length < 120 &&
+      !trimmed.includes("Traceback") &&
+      !trimmed.includes("OperationalError") &&
+      !trimmed.includes("Exception") &&
+      !trimmed.includes("<") &&
+      !trimmed.includes("{")
+    ) {
+      return trimmed;
+    }
+  }
+
+  switch (status) {
+    case 400:
+      return "The request was invalid. Please check your laboratory input data.";
+    case 401:
+      return "Your session has expired or requires authentication. Please sign in.";
+    case 403:
+      return "You do not have administrative permission for this action.";
+    case 404:
+      return "The requested laboratory record, sample, or experiment could not be found.";
+    case 409:
+      return "A record with this name or code already exists, or was updated in another session.";
+    case 422:
+      return "Invalid data formatting. Please check the values you entered.";
+    case 429:
+      return "Too many requests. Please wait a moment before trying again.";
+    case 500:
+    case 502:
+    case 503:
+    case 504:
+      return "The laboratory service is temporarily unavailable. Please try again shortly.";
+    default:
+      return `Operation could not be completed (Status ${status}). Please try again.`;
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   if (!(init?.body instanceof FormData)) {
     headers.set("Content-Type", "application/json");
   }
   if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
-  let response = await fetch(path, { ...init, headers });
+  let response: Response;
+  try {
+    response = await fetch(path, { ...init, headers });
+  } catch {
+    throw new Error("Unable to connect to the laboratory server. Please check your network connection.");
+  }
   const unauthenticatedAuthPaths = [
     "/auth/login", "/auth/refresh", "/auth/logout", "/auth/password-reset/request",
     "/auth/password-reset/complete", "/auth/invitations/accept",
@@ -66,7 +113,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
   if (!response.ok) {
     const body = (await response.json().catch(() => null)) as { detail?: string } | null;
-    throw new Error(body?.detail ?? `Request failed (${response.status}).`);
+    const friendlyMsg = getFriendlyApiErrorMessage(response.status, body?.detail);
+    const err = new Error(friendlyMsg);
+    (err as any).status = response.status;
+    throw err;
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
@@ -587,7 +637,7 @@ async function requestBlob(path: string): Promise<Blob> {
   }
   if (!response.ok) {
     const body = (await response.json().catch(() => null)) as { detail?: string } | null;
-    throw new Error(body?.detail ?? `Request failed (${response.status}).`);
+    throw new Error(getFriendlyApiErrorMessage(response.status, body?.detail));
   }
   return response.blob();
 }
@@ -617,14 +667,22 @@ export interface OrganizationUser {
 }
 
 async function authRequest<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
-    ...init,
-    credentials: "same-origin",
-    headers: { "Content-Type": "application/json", ...init?.headers },
-  });
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      ...init,
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", ...init?.headers },
+    });
+  } catch {
+    throw new Error("Unable to connect to the authentication service. Please check your network connection.");
+  }
   if (!response.ok) {
     const body = (await response.json().catch(() => null)) as { detail?: string } | null;
-    throw new Error(body?.detail ?? `Request failed (${response.status}).`);
+    const friendlyMsg = getFriendlyApiErrorMessage(response.status, body?.detail);
+    const err = new Error(friendlyMsg);
+    (err as any).status = response.status;
+    throw err;
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;

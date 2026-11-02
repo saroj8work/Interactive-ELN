@@ -47,24 +47,20 @@ const PRESETS: Record<GridPreset, PresetConfig> = {
 
 const ROW_LABELS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
-// Helper to extract coordinate from sample storage string or description
 function getSampleCoordinate(sample: SampleRecord): string | null {
   const text = `${sample.storage_location} ${sample.description}`;
-  // Look for patterns like [A1], (B12), slot: C4, or standalone A1..Z99
   const bracketMatch = text.match(/\[([A-Z]\d{1,2})\]/i);
   if (bracketMatch) return bracketMatch[1].toUpperCase();
 
   const slotMatch = text.match(/\b(?:slot|well|pos|coord):\s*([A-Z]\d{1,2})\b/i);
   if (slotMatch) return slotMatch[1].toUpperCase();
 
-  // If storage_location is directly the coordinate
   const directMatch = sample.storage_location.trim().match(/^([A-Z]\d{1,2})$/i);
   if (directMatch) return directMatch[1].toUpperCase();
 
   return null;
 }
 
-// Generate color from string for sample types
 function getSampleColor(type: string): string {
   const colors: Record<string, string> = {
     dna: "#3b82f6",
@@ -91,14 +87,15 @@ export function StorageBoxGrid({
   onClearCoordinate,
   disabled = false,
 }: StorageBoxGridProps) {
-  const [preset, setPreset] = useState<GridPreset>("9x9");
+  const [preset, setPreset] = useState<GridPreset>("8x12");
   const [selectedCoord, setSelectedCoord] = useState<string | null>(null);
+  const [selectedCoords, setSelectedCoords] = useState<Set<string>>(new Set());
   const [assigningSampleId, setAssigningSampleId] = useState<number | "">("");
   const [isSaving, setIsSaving] = useState(false);
+  const [batchNotice, setBatchNotice] = useState("");
 
   const config = PRESETS[preset];
 
-  // Map coordinates to samples for this specific location
   const { coordMap, unassignedSamples } = useMemo(() => {
     const locSamples = samples.filter((s) => s.storage_location_id === location.id);
     const map = new Map<string, SampleRecord>();
@@ -122,6 +119,83 @@ export function StorageBoxGrid({
 
   const selectedSample = selectedCoord ? coordMap.get(selectedCoord) ?? null : null;
 
+  // Single cell selection or multi-toggle
+  function handleCellClick(coord: string, shiftKey: boolean) {
+    if (shiftKey || selectedCoords.size > 0) {
+      const next = new Set(selectedCoords);
+      if (next.has(coord)) {
+        next.delete(coord);
+      } else {
+        next.add(coord);
+      }
+      setSelectedCoords(next);
+      setSelectedCoord(coord);
+    } else {
+      setSelectedCoord(coord);
+      setSelectedCoords(new Set([coord]));
+    }
+  }
+
+  // Row header selection (e.g. click "A" to select A1..A12)
+  function handleRowClick(rowLetter: string) {
+    const next = new Set(selectedCoords);
+    const rowCoords = Array.from({ length: config.cols }, (_, c) => `${rowLetter}${c + 1}`);
+    const allSelected = rowCoords.every((c) => next.has(c));
+
+    for (const c of rowCoords) {
+      if (allSelected) {
+        next.delete(c);
+      } else {
+        next.add(c);
+      }
+    }
+    setSelectedCoords(next);
+    if (!allSelected) setSelectedCoord(rowCoords[0]);
+  }
+
+  // Column header selection (e.g. click "1" to select A1..H1)
+  function handleColClick(colNum: number) {
+    const next = new Set(selectedCoords);
+    const colCoords = Array.from({ length: config.rows }, (_, r) => `${ROW_LABELS[r]}${colNum}`);
+    const allSelected = colCoords.every((c) => next.has(c));
+
+    for (const c of colCoords) {
+      if (allSelected) {
+        next.delete(c);
+      } else {
+        next.add(c);
+      }
+    }
+    setSelectedCoords(next);
+    if (!allSelected) setSelectedCoord(colCoords[0]);
+  }
+
+  function selectAllEmpty() {
+    const next = new Set<string>();
+    for (let r = 0; r < config.rows; r++) {
+      for (let c = 1; c <= config.cols; c++) {
+        const coord = `${ROW_LABELS[r]}${c}`;
+        if (!coordMap.has(coord)) {
+          next.add(coord);
+        }
+      }
+    }
+    setSelectedCoords(next);
+    setBatchNotice(`Selected ${next.size} empty wells.`);
+  }
+
+  function selectAllOccupied() {
+    const next = new Set<string>(coordMap.keys());
+    setSelectedCoords(next);
+    setBatchNotice(`Selected ${next.size} occupied wells.`);
+  }
+
+  function clearSelection() {
+    setSelectedCoords(new Set());
+    setSelectedCoord(null);
+    setBatchNotice("");
+  }
+
   async function handleAssignSlot() {
     if (!selectedCoord || !assigningSampleId || !onAssignCoordinate) return;
     try {
@@ -143,6 +217,46 @@ export function StorageBoxGrid({
     }
   }
 
+  async function handleBatchClear() {
+    if (!onClearCoordinate || selectedCoords.size === 0) return;
+    setIsSaving(true);
+    setBatchNotice(`Clearing ${selectedCoords.size} wells...`);
+    try {
+      let count = 0;
+      for (const coord of selectedCoords) {
+        const s = coordMap.get(coord);
+        if (s) {
+          await onClearCoordinate(s.id);
+          count++;
+        }
+      }
+      setSelectedCoords(new Set());
+      setBatchNotice(`Cleared ${count} samples from selected wells.`);
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleBatchAssignSequence() {
+    if (!onAssignCoordinate || selectedCoords.size === 0 || unassignedSamples.length === 0) return;
+    setIsSaving(true);
+    setBatchNotice("Assigning samples in sequence...");
+    try {
+      const emptyCoords = Array.from(selectedCoords)
+        .filter((c) => !coordMap.has(c))
+        .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+
+      const toAssign = Math.min(emptyCoords.length, unassignedSamples.length);
+      for (let i = 0; i < toAssign; i++) {
+        await onAssignCoordinate(unassignedSamples[i].id, emptyCoords[i]);
+      }
+      setSelectedCoords(new Set());
+      setBatchNotice(`Successfully placed ${toAssign} samples into coordinate wells.`);
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
   return (
     <div className="storage-box-grid-container" style={{ marginTop: "1rem" }}>
       <div
@@ -152,12 +266,12 @@ export function StorageBoxGrid({
           alignItems: "center",
           flexWrap: "wrap",
           gap: "0.75rem",
-          marginBottom: "1rem",
+          marginBottom: "0.75rem",
         }}
       >
         <div>
           <h4 style={{ margin: 0 }}>
-            {location.name} ({location.code}) - 2D Grid Visualizer
+            {location.name} ({location.code}) &mdash; 2D Grid Visualizer
           </h4>
           <span style={{ fontSize: "0.85rem", color: "#64748b" }}>
             {config.description} | {occupiedCount} / {totalCells} slots occupied ({occupancyPct}%)
@@ -168,7 +282,11 @@ export function StorageBoxGrid({
           <label style={{ fontSize: "0.85rem", fontWeight: 600 }}>Grid Layout:</label>
           <select
             value={preset}
-            onChange={(e) => setPreset(e.target.value as GridPreset)}
+            onChange={(e) => {
+              setPreset(e.target.value as GridPreset);
+              setSelectedCoords(new Set());
+              setSelectedCoord(null);
+            }}
             style={{ padding: "0.25rem 0.5rem", borderRadius: "4px" }}
           >
             {Object.entries(PRESETS).map(([key, val]) => (
@@ -188,12 +306,12 @@ export function StorageBoxGrid({
           backgroundColor: "#e2e8f0",
           borderRadius: "3px",
           overflow: "hidden",
-          marginBottom: "1.25rem",
+          marginBottom: "0.75rem",
         }}
       >
         <div
           style={{
-            width: `${Math.min(100, occupancyPct)}%`,
+            width: `${occupancyPct}%`,
             height: "100%",
             backgroundColor: occupancyPct > 90 ? "#ef4444" : occupancyPct > 70 ? "#f59e0b" : "#10b981",
             transition: "width 0.3s ease",
@@ -201,17 +319,86 @@ export function StorageBoxGrid({
         />
       </div>
 
+      {/* Multi-Well Batch Toolbar */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: "8px",
+          flexWrap: "wrap",
+          padding: "6px 12px",
+          borderRadius: "6px",
+          background: "var(--card-bg, #f8fafc)",
+          border: "1px solid var(--border-color, #e2e8f0)",
+          marginBottom: "0.75rem",
+          fontSize: "12px",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }}>
+          <span style={{ fontWeight: 700, color: "var(--text-primary, #334155)" }}>
+            ⚡ Multi-Well Batch Mode:
+          </span>
+          <button className="button button-outline button-small" type="button" onClick={selectAllEmpty}>
+            Select All Empty
+          </button>
+          <button className="button button-outline button-small" type="button" onClick={selectAllOccupied}>
+            Select All Occupied
+          </button>
+          {selectedCoords.size > 0 && (
+            <button className="button button-outline button-small" type="button" onClick={clearSelection}>
+              Deselect ({selectedCoords.size})
+            </button>
+          )}
+        </div>
+
+        {selectedCoords.size > 1 && !disabled && (
+          <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+            <span style={{ fontWeight: 600, color: "#2563eb" }}>
+              {selectedCoords.size} wells selected
+            </span>
+            {unassignedSamples.length > 0 && onAssignCoordinate && (
+              <button
+                className="button button-primary button-small"
+                type="button"
+                onClick={() => void handleBatchAssignSequence()}
+                disabled={isSaving}
+              >
+                Batch Fill Sequence ({Math.min(selectedCoords.size, unassignedSamples.length)})
+              </button>
+            )}
+            {onClearCoordinate && (
+              <button
+                className="button button-outline button-small"
+                type="button"
+                onClick={() => void handleBatchClear()}
+                disabled={isSaving}
+                style={{ color: "#ef4444", borderColor: "#fca5a5" }}
+              >
+                Batch Clear
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      {batchNotice && (
+        <div style={{ padding: "4px 10px", marginBottom: "8px", borderRadius: 4, background: "#ecfdf5", color: "#065f46", fontSize: 11 }}>
+          {batchNotice}
+        </div>
+      )}
+
       <div style={{ display: "flex", gap: "1.5rem", alignItems: "flex-start", flexWrap: "wrap" }}>
         {/* 2D Grid Table */}
         <div style={{ overflowX: "auto", flex: "1 1 500px" }}>
           <div
             style={{
               display: "inline-block",
-              background: "#ffffff",
+              background: "var(--card-bg, #ffffff)",
               padding: "1rem",
               borderRadius: "8px",
               boxShadow: "0 1px 3px rgba(0,0,0,0.1)",
-              border: "1px solid #cbd5e1",
+              border: "1px solid var(--border-color, #cbd5e1)",
             }}
           >
             <table
@@ -227,13 +414,17 @@ export function StorageBoxGrid({
                   {Array.from({ length: config.cols }).map((_, c) => (
                     <th
                       key={c}
+                      onClick={() => handleColClick(c + 1)}
+                      title={`Click to select entire Column ${c + 1}`}
                       style={{
                         width: "36px",
                         height: "24px",
                         textAlign: "center",
                         fontSize: "0.75rem",
-                        fontWeight: 600,
-                        color: "#475569",
+                        fontWeight: 700,
+                        color: "var(--text-secondary, #475569)",
+                        cursor: "pointer",
+                        borderRadius: "3px",
                       }}
                     >
                       {c + 1}
@@ -247,13 +438,17 @@ export function StorageBoxGrid({
                   return (
                     <tr key={rowLetter}>
                       <td
+                        onClick={() => handleRowClick(rowLetter)}
+                        title={`Click to select entire Row ${rowLetter}`}
                         style={{
                           width: "24px",
                           textAlign: "center",
                           fontSize: "0.75rem",
-                          fontWeight: 600,
-                          color: "#475569",
+                          fontWeight: 700,
+                          color: "var(--text-secondary, #475569)",
+                          cursor: "pointer",
                           paddingRight: "4px",
+                          borderRadius: "3px",
                         }}
                       >
                         {rowLetter}
@@ -261,17 +456,18 @@ export function StorageBoxGrid({
                       {Array.from({ length: config.cols }).map((_, c) => {
                         const coord = `${rowLetter}${c + 1}`;
                         const sample = coordMap.get(coord);
-                        const isSelected = selectedCoord === coord;
+                        const isMultiSelected = selectedCoords.has(coord);
+                        const isPrimarySelected = selectedCoord === coord;
                         const sampleColor = sample ? getSampleColor(sample.sample_type) : undefined;
 
                         return (
                           <td
                             key={coord}
-                            onClick={() => setSelectedCoord(coord)}
+                            onClick={(e) => handleCellClick(coord, e.shiftKey)}
                             title={
                               sample
                                 ? `${coord}: ${sample.name} (${sample.sample_type})\nID: ${sample.external_id || "None"}\nStatus: ${sample.status}`
-                                : `${coord}: Empty slot (click to assign)`
+                                : `${coord}: Empty slot (click to select or Shift+click for batch)`
                             }
                             style={{
                               width: "36px",
@@ -287,22 +483,23 @@ export function StorageBoxGrid({
                                 width: "36px",
                                 height: "36px",
                                 borderRadius: preset === "8x12" ? "50%" : "6px",
-                                border: isSelected
+                                border: isMultiSelected
                                   ? "2px solid #2563eb"
                                   : sample
                                   ? `1px solid ${sampleColor}`
-                                  : "1px dashed #cbd5e1",
-                                backgroundColor: isSelected
+                                  : "1px dashed var(--border-color, #cbd5e1)",
+                                backgroundColor: isMultiSelected
                                   ? "#dbeafe"
                                   : sample
                                   ? `${sampleColor}25`
-                                  : "#f8fafc",
+                                  : "var(--cell-bg, #f8fafc)",
                                 display: "flex",
                                 flexDirection: "column",
                                 alignItems: "center",
                                 justifyContent: "center",
                                 transition: "all 0.15s ease",
-                                transform: isSelected ? "scale(1.08)" : "none",
+                                transform: isPrimarySelected ? "scale(1.10)" : isMultiSelected ? "scale(1.04)" : "none",
+                                boxShadow: isMultiSelected ? "0 0 6px rgba(37,99,235,0.4)" : "none",
                               }}
                             >
                               {sample ? (
@@ -316,7 +513,7 @@ export function StorageBoxGrid({
                                   }}
                                 />
                               ) : (
-                                <span style={{ fontSize: "0.6rem", color: "#94a3b8", userSelect: "none" }}>
+                                <span style={{ fontSize: "0.6rem", color: isMultiSelected ? "#1d4ed8" : "#94a3b8", userSelect: "none" }}>
                                   {coord}
                                 </span>
                               )}
@@ -337,18 +534,57 @@ export function StorageBoxGrid({
           style={{
             flex: "1 1 260px",
             minWidth: "260px",
-            background: "#ffffff",
+            background: "var(--card-bg, #ffffff)",
             padding: "1rem",
             borderRadius: "8px",
-            border: "1px solid #cbd5e1",
+            border: "1px solid var(--border-color, #cbd5e1)",
             boxShadow: "0 1px 3px rgba(0,0,0,0.05)",
           }}
         >
-          <h5 style={{ margin: "0 0 0.5rem 0", borderBottom: "1px solid #e2e8f0", paddingBottom: "0.5rem" }}>
-            {selectedCoord ? `Slot Details: ${selectedCoord}` : "Select a Well / Slot"}
+          <h5 style={{ margin: "0 0 0.5rem 0", borderBottom: "1px solid var(--border-color, #e2e8f0)", paddingBottom: "0.5rem" }}>
+            {selectedCoords.size > 1
+              ? `Batch Selection (${selectedCoords.size} wells)`
+              : selectedCoord
+              ? `Slot Details: ${selectedCoord}`
+              : "Select a Well / Slot"}
           </h5>
 
-          {selectedCoord ? (
+          {selectedCoords.size > 1 ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+              <p style={{ margin: 0, fontSize: "0.85rem", color: "var(--text-secondary, #64748b)" }}>
+                <strong>{selectedCoords.size}</strong> wells currently selected across grid.
+              </p>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "4px", maxHeight: "100px", overflowY: "auto" }}>
+                {Array.from(selectedCoords).map((c) => (
+                  <span key={c} style={{ fontSize: "0.75rem", padding: "2px 6px", borderRadius: 4, background: "#dbeafe", color: "#1e40af" }}>
+                    {c}
+                  </span>
+                ))}
+              </div>
+              {!disabled && unassignedSamples.length > 0 && onAssignCoordinate && (
+                <button
+                  className="button button-primary"
+                  type="button"
+                  onClick={() => void handleBatchAssignSequence()}
+                  disabled={isSaving}
+                  style={{ width: "100%" }}
+                >
+                  {isSaving ? "Assigning..." : `Fill ${Math.min(selectedCoords.size, unassignedSamples.length)} Samples in Sequence`}
+                </button>
+              )}
+              {!disabled && onClearCoordinate && (
+                <button
+                  className="button button-outline"
+                  type="button"
+                  onClick={() => void handleBatchClear()}
+                  disabled={isSaving}
+                  style={{ width: "100%", color: "#ef4444", borderColor: "#fca5a5" }}
+                >
+                  {isSaving ? "Clearing..." : "Clear Occupants from Selected"}
+                </button>
+              )}
+            </div>
+          ) : selectedCoord ? (
             selectedSample ? (
               <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
                 <div>
@@ -430,12 +666,12 @@ export function StorageBoxGrid({
             )
           ) : (
             <p style={{ fontSize: "0.85rem", color: "#94a3b8", margin: 0 }}>
-              Click any coordinate cell in the grid above to view sample details or assign an unassigned sample to that slot.
+              Click any coordinate cell or drag/Shift+click to batch-select multiple wells.
             </p>
           )}
 
           {unassignedSamples.length > 0 && (
-            <div style={{ marginTop: "1.25rem", borderTop: "1px solid #e2e8f0", paddingTop: "0.75rem" }}>
+            <div style={{ marginTop: "1.25rem", borderTop: "1px solid var(--border-color, #e2e8f0)", paddingTop: "0.75rem" }}>
               <span style={{ fontSize: "0.8rem", fontWeight: 600, color: "#64748b" }}>
                 Unplaced in this container: {unassignedSamples.length}
               </span>

@@ -39,6 +39,7 @@ import { BarcodeScannerModal } from "./BarcodeScannerModal";
 import { FormalReportView } from "./FormalReportView";
 import { ChemicalSearchModal } from "./ChemicalSearchModal";
 import { LandingPage } from "./LandingPage";
+import { MentionAutocomplete } from "./MentionAutocomplete";
 import { formatLocaleDate, formatLocaleDateOnly, getSavedLocale, saveLocale, translate, type Locale } from "./i18n";
 
 function formatDate(value: string): string {
@@ -161,8 +162,29 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
   const [selectedExperiment, setSelectedExperiment] = useState<number | null>(null);
   const selectedExperimentRef = useRef<number | null>(selectedExperiment);
   const [selectedEntry, setSelectedEntry] = useState<number | null>(null);
-  const [notice, setNotice] = useState("");
-  const [error, setError] = useState("");
+  // Short-lived Toast Notification System
+  const [toasts, setToasts] = useState<{ id: string; type: "error" | "success" | "info"; message: string }[]>([]);
+
+  const showToast = useCallback((message: string, type: "error" | "success" | "info" = "info", duration = 4500) => {
+    if (!message) return;
+    const id = Math.random().toString(36).slice(2, 9);
+    setToasts((prev) => [...prev.slice(-3), { id, type, message }]);
+    window.setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, duration);
+  }, []);
+
+  const setError = useCallback((msg: string) => {
+    if (msg) showToast(msg, "error", 5000);
+  }, [showToast]);
+
+  const setNotice = useCallback((msg: string) => {
+    if (msg) showToast(msg, "success", 4000);
+  }, [showToast]);
+
+  const setAuditNotice = useCallback((msg: string) => {
+    if (msg) showToast(msg, "info", 4500);
+  }, [showToast]);
   const [adminOpen, setAdminOpen] = useState(false);
   const [integrationsOpen, setIntegrationsOpen] = useState(false);
   const [projectAccessRole, setProjectAccessRole] = useState<
@@ -187,13 +209,80 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
   const [workflowRulesOpen, setWorkflowRulesOpen] = useState(false);
   const [locationsOpen, setLocationsOpen] = useState(false);
   const [editorMode, setEditorMode] = useState<"edit" | "preview">("edit");
-  const [auditNotice, setAuditNotice] = useState("");
   const [activeMoleculeStructure, setActiveMoleculeStructure] = useState<Structure | null>(null);
   const [barcodeScannerOpen, setBarcodeScannerOpen] = useState(false);
   const [formalReportOpen, setFormalReportOpen] = useState(false);
   const [chemSearchOpen, setChemSearchOpen] = useState(false);
   const [inventoryItems, setInventoryItems] = useState<InventoryItem[]>([]);
   const [samples, setSamples] = useState<SampleRecord[]>([]);
+
+  // UX Enhancements: Theme State
+  const [theme, setTheme] = useState<"dark" | "light">(() =>
+    typeof window !== "undefined" && localStorage.getItem("aura_theme") === "light" ? "light" : "dark"
+  );
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem("aura_theme", theme);
+  }, [theme]);
+
+  // UX Enhancements: Sidebar Collapse & Ctrl+B shortcut
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() =>
+    typeof window !== "undefined" && localStorage.getItem("aura_sidebar_collapsed") === "true"
+  );
+  useEffect(() => {
+    localStorage.setItem("aura_sidebar_collapsed", String(sidebarCollapsed));
+  }, [sidebarCollapsed]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "b") {
+        e.preventDefault();
+        setSidebarCollapsed((prev) => !prev);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
+  // UX Enhancements: Glove-Friendly Bench Mode
+  const [benchMode, setBenchMode] = useState<boolean>(() =>
+    typeof window !== "undefined" && localStorage.getItem("aura_bench_mode") === "true"
+  );
+  useEffect(() => {
+    document.documentElement.setAttribute("data-bench-mode", String(benchMode));
+    localStorage.setItem("aura_bench_mode", String(benchMode));
+  }, [benchMode]);
+
+  // UX Enhancements: Continuous Autosave
+  const [autosaveStatus, setAutosaveStatus] = useState<"saved" | "unsaved" | "saving" | null>(null);
+  const [lastSavedTime, setLastSavedTime] = useState<string | null>(null);
+  const autosaveTimerRef = useRef<number | null>(null);
+
+  const handleEntryInputChange = useCallback(() => {
+    setAutosaveStatus("unsaved");
+    if (autosaveTimerRef.current) window.clearTimeout(autosaveTimerRef.current);
+    autosaveTimerRef.current = window.setTimeout(async () => {
+      const activeEntry = entries.find((item) => item.id === selectedEntry);
+      if (!activeEntry) return;
+      const titleEl = document.getElementById("entry-title") as HTMLInputElement | null;
+      const contentEl = document.getElementById("entry-content") as HTMLTextAreaElement | null;
+      if (!titleEl || !contentEl) return;
+      setAutosaveStatus("saving");
+      try {
+        const updated = await api.updateEntry(
+          activeEntry.id,
+          titleEl.value.trim() || activeEntry.title,
+          contentEl.value,
+        );
+        setEntries((items) => items.map((e) => (e.id === updated.id ? updated : e)));
+        setAutosaveStatus("saved");
+        const timeStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        setLastSavedTime(timeStr);
+      } catch {
+        setAutosaveStatus("unsaved");
+      }
+    }, 2500);
+  }, [entries, selectedEntry]);
 
   const loadInventoryAndSamples = useCallback(async () => {
     try {
@@ -701,6 +790,9 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
       );
       setEntries((items) => items.map((entry) => (entry.id === updated.id ? updated : entry)));
       setNotice(`Saved ${formatDate(updated.updated_at)}.`);
+      setAutosaveStatus("saved");
+      const timeStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      setLastSavedTime(timeStr);
       await loadProjects();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to save entry.");
@@ -874,15 +966,25 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
 
   return (
     <div className="app-shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-mark">
-            <img src="/app-icon.jpg" alt="Aura Lab" />
+      <aside className={`sidebar ${sidebarCollapsed ? "collapsed" : ""}`}>
+        <div className="brand" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+            <div className="brand-mark">
+              <img src="/app-icon.jpg" alt="Aura Lab" />
+            </div>
+            <div>
+              <strong>Aura Lab</strong>
+              <span>{t("Research workspace")}</span>
+            </div>
           </div>
-          <div>
-            <strong>Aura Lab</strong>
-            <span>{t("Research workspace")}</span>
-          </div>
+          <button
+            className="sidebar-collapse-btn"
+            type="button"
+            onClick={() => setSidebarCollapsed((c) => !c)}
+            title={sidebarCollapsed ? "Expand sidebar (Ctrl+B)" : "Collapse sidebar (Ctrl+B)"}
+          >
+            {sidebarCollapsed ? "▶" : "◀"}
+          </button>
         </div>
         <div className="workspace-label">{t("WORKSPACE")}</div>
         <div className="sidebar-heading">
@@ -925,6 +1027,32 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
             <strong>{selectedProjectData?.name ?? t("Your notebook")}</strong>
           </div>
           <div className="topbar-right">
+            <button
+              className="sidebar-collapse-btn"
+              type="button"
+              onClick={() => setSidebarCollapsed((c) => !c)}
+              title={sidebarCollapsed ? "Expand sidebar (Ctrl+B)" : "Collapse sidebar (Ctrl+B)"}
+            >
+              {sidebarCollapsed ? "▶ Expand" : "◀ Collapse"}
+            </button>
+            <button
+              className="button button-outline"
+              type="button"
+              onClick={() => setTheme((curr) => (curr === "dark" ? "light" : "dark"))}
+              title={theme === "dark" ? "Switch to Light Mode" : "Switch to Dark Mode"}
+              style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
+            >
+              {theme === "dark" ? "☀️ Light" : "🌙 Dark"}
+            </button>
+            <button
+              className={`button button-outline ${benchMode ? "bench-mode-active" : ""}`}
+              type="button"
+              onClick={() => setBenchMode((curr) => !curr)}
+              title="Toggle Glove-Friendly Benchtop Mode"
+              style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
+            >
+              🧤 {benchMode ? "Bench Mode: ON" : "Bench Mode"}
+            </button>
             <div className="notification-menu">
               <button className="button button-outline notification-toggle" aria-label={t("Notifications")} aria-expanded={notificationsOpen} onClick={() => setNotificationsOpen((open) => !open)}>
                 {t("Notifications")}
@@ -1026,24 +1154,27 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
           </div>
         </header>
 
-        {error && (
-          <div className="notice notice-error" role="alert">
-            {error}
-            <button aria-label="Dismiss error" onClick={() => setError("")}>×</button>
-          </div>
-        )}
-        {auditNotice && (
-          <div className="notice notice-success" role="status">
-            {auditNotice}
-            <button aria-label="Dismiss audit notice" onClick={() => setAuditNotice("")}>×</button>
-          </div>
-        )}
-        {notice && (
-          <div className="notice notice-success" role="status">
-            {notice}
-            <button aria-label="Dismiss notice" onClick={() => setNotice("")}>×</button>
-          </div>
-        )}
+        {/* Short-Lived Toast Notification System */}
+        <div className="aura-toast-container" aria-live="polite">
+          {toasts.map((toast) => (
+            <div key={toast.id} className={`aura-toast aura-toast-${toast.type}`} role="alert">
+              <span className="toast-icon">
+                {toast.type === "error" && "⚠️"}
+                {toast.type === "success" && "✓"}
+                {toast.type === "info" && "ℹ️"}
+              </span>
+              <span className="toast-message">{toast.message}</span>
+              <button
+                className="toast-close"
+                type="button"
+                onClick={() => setToasts((prev) => prev.filter((t) => t.id !== toast.id))}
+                aria-label="Dismiss notification"
+              >
+                &times;
+              </button>
+            </div>
+          ))}
+        </div>
         {/* Parity Modals: Barcode Scanner, Formal Report, Chemical Search */}
         <BarcodeScannerModal
           isOpen={barcodeScannerOpen}
@@ -1611,15 +1742,28 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
                         )}
                       </div>
                       <form className="entry-content-form" onSubmit={handleSaveEntry}>
-                        <input
-                          aria-label="Entry title"
-                          className="entry-title-input"
-                          defaultValue={activeEntry.title}
-                          key={`${activeEntry.id}-${activeEntry.updated_at}-title`}
-                          name="title"
-                          required
-                          maxLength={200}
-                        />
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px" }}>
+                          <input
+                            aria-label="Entry title"
+                            id="entry-title"
+                            className="entry-title-input"
+                            defaultValue={activeEntry.title}
+                            key={`${activeEntry.id}-${activeEntry.updated_at}-title`}
+                            name="title"
+                            onChange={handleEntryInputChange}
+                            required
+                            maxLength={200}
+                            style={{ flex: 1 }}
+                          />
+                          {autosaveStatus && (
+                            <span className={`autosave-pill status-${autosaveStatus}`}>
+                              <span className="autosave-dot" />
+                              {autosaveStatus === "saved" && `Saved${lastSavedTime ? ` (${lastSavedTime})` : ""}`}
+                              {autosaveStatus === "saving" && "Saving draft..."}
+                              {autosaveStatus === "unsaved" && "Unsaved changes"}
+                            </span>
+                          )}
+                        </div>
                         <div className="editor-mode-toggle">
                           <label className="editor-label" htmlFor="entry-content">OBSERVATIONS &amp; NOTES</label>
                           <div style={{ marginLeft: "auto", display: "flex", gap: "6px" }}>
@@ -1731,6 +1875,7 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
                               key={`${activeEntry.id}-${activeEntry.updated_at}-content`}
                               name="content"
                               defaultValue={activeEntry.content}
+                              onChange={handleEntryInputChange}
                               placeholder="Record your observations, methods, results, and next steps..."
                               maxLength={100_000}
                             />
@@ -1739,11 +1884,28 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
                             </small>
                           </>
                         )}
-                        <div className="editor-footer">
-                          <span>Changes are saved when you select Save entry.</span>
+                        <div className="editor-footer" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                            {autosaveStatus ? (
+                              <span className={`autosave-pill status-${autosaveStatus}`}>
+                                <span className="autosave-dot" />
+                                {autosaveStatus === "saved" && `Autosaved${lastSavedTime ? ` at ${lastSavedTime}` : ""}`}
+                                {autosaveStatus === "saving" && "Saving draft..."}
+                                {autosaveStatus === "unsaved" && "Unsaved changes"}
+                              </span>
+                            ) : (
+                              <span style={{ fontSize: 11, color: "var(--text-secondary, #64748b)" }}>Autosaves continuously</span>
+                            )}
+                          </div>
                           <button className="button button-primary" type="submit">Save entry</button>
                         </div>
                       </form>
+                      <MentionAutocomplete
+                        textareaId="entry-content"
+                        inventoryItems={inventoryItems}
+                        samples={samples}
+                        experiments={experiments}
+                      />
                       </div>
                     ) : (
                       <div className="editor-empty">
@@ -1930,7 +2092,13 @@ function AuthScreen({
   onLogin: (organization: string, email: string, password: string) => Promise<void>;
   onBackToLanding?: () => void;
 }) {
-  const [error, setError] = useState("");
+  const [error, setErrorState] = useState("");
+  const setError = useCallback((msg: string) => {
+    setErrorState(msg);
+    if (msg) {
+      window.setTimeout(() => setErrorState(""), 5000);
+    }
+  }, []);
   const [busy, setBusy] = useState(false);
   const [recoveryMode, setRecoveryMode] = useState(false);
   const [recoverySent, setRecoverySent] = useState(false);
