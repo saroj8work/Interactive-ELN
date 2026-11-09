@@ -3244,3 +3244,32 @@ async def verify_entry_timestamp(
         ENTRY_TIMESTAMP_VERIFICATION,
         organization_id=principal.organization_id,
     )
+
+
+aura_router = APIRouter(prefix="/api/aura", tags=["aura"])
+
+
+@aura_router.post("/voice-command")
+async def process_aura_voice_command(
+    transcript: Annotated[str, Form(...)],
+    audio: Annotated[UploadFile | None, File()] = None,
+) -> dict[str, Any]:
+    audio_size_bytes = 0
+    audio_mime_type = "none"
+    if audio is not None:
+        content = await audio.read()
+        audio_size_bytes = len(content)
+        audio_mime_type = audio.content_type or "audio/webm"
+
+    clean_transcript = transcript.strip()
+    return {
+        "status": "success",
+        "action": "processed",
+        "transcript": clean_transcript,
+        "audio_received": audio is not None,
+        "audio_size_bytes": audio_size_bytes,
+        "audio_mime_type": audio_mime_type,
+        "ai_response": f"Aura AI Gate received: '{clean_transcript}'. Voice telemetry analyzed ({round(audio_size_bytes / 1024, 1)} KB). Ready for scientific action.",
+        "ui_actions": [{"action_type": "OPEN_MODAL", "target": "inventory", "parameters": {}}] if "inventory" in clean_transcript.lower() or "reagent" in clean_transcript.lower() else [{"action_type": "OPEN_MODAL", "target": "equipment", "parameters": {}}] if "equipment" in clean_transcript.lower() or "schedule" in clean_transcript.lower() else [{"action_type": "OPEN_MODAL", "target": "chemical_search", "parameters": {}}] if "chem" in clean_transcript.lower() or "structure" in clean_transcript.lower() else [{"action_type": "OPEN_MODAL", "target": "barcode_scanner", "parameters": {}}] if "barcode" in clean_transcript.lower() or "scan" in clean_transcript.lower() else [{"action_type": "OPEN_MODAL", "target": "formal_report", "parameters": {}}] if "report" in clean_transcript.lower() else [{"action_type": "SET_THEME", "target": "dark" if "dark" in clean_transcript.lower() else "light", "parameters": {}}] if "theme" in clean_transcript.lower() else [],
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }

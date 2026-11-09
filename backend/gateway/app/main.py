@@ -12,6 +12,7 @@ from .client import ServiceClient
 from .router import (
     activity_router,
     attachments_router,
+    aura_router,
     booking_router,
     inventory_router,
     integrations_router,
@@ -45,6 +46,14 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
     allow_headers=["Content-Type", "Authorization"],
 )
+from .plates_router import plates_router
+from .cheminformatics_router import cheminformatics_router
+from .molecular_router import molecular_router
+from .canvas_router import canvas_router
+from .analytics_router import analytics_router
+from .dossier_router import dossier_router
+from .thermal_printer_router import thermal_printer_router
+
 app.include_router(projects_router)
 app.include_router(notebook_router)
 app.include_router(activity_router)
@@ -54,6 +63,14 @@ app.include_router(attachments_router)
 app.include_router(search_router)
 app.include_router(booking_router)
 app.include_router(integrations_router)
+app.include_router(aura_router)
+app.include_router(plates_router)
+app.include_router(cheminformatics_router)
+app.include_router(molecular_router)
+app.include_router(canvas_router)
+app.include_router(analytics_router)
+app.include_router(dossier_router)
+app.include_router(thermal_printer_router)
 
 
 @app.get("/api/health")

@@ -271,7 +271,7 @@ class InventoryItemRead(InventoryItemCreate):
     organization_id: int
     created_at: datetime
     updated_at: datetime
-    status: Literal["active", "archived"]
+    status: Literal["active", "archived", "operational"]
 
 
 class InventoryCustomFieldDefinitionCreate(BaseModel):
@@ -310,7 +310,7 @@ class InventoryCustomFieldDefinitionRead(InventoryCustomFieldDefinitionCreate):
     organization_id: int
     created_by_user_id: int
     created_at: datetime
-    status: Literal["active", "archived"]
+    status: Literal["active", "archived", "operational"]
 
 
 class StorageLocationCreate(BaseModel):
@@ -328,7 +328,7 @@ class StorageLocationRead(StorageLocationCreate):
 
     id: int
     organization_id: int
-    status: Literal["active", "archived"]
+    status: Literal["active", "archived", "operational"]
     created_by_user_id: int
     created_at: datetime
 
@@ -510,7 +510,7 @@ class SampleRead(SampleCreate):
     created_by_user_id: int
     current_custodian_user_id: int
     created_at: datetime
-    status: Literal["active", "archived"]
+    status: Literal["active", "archived", "operational"]
 
 
 class TemplateSection(BaseModel):
@@ -538,11 +538,11 @@ class NotebookTemplateRead(NotebookTemplateCreate):
     created_by_user_id: int
     created_at: datetime
     updated_at: datetime
-    status: Literal["active", "archived"]
+    status: Literal["active", "archived", "operational"]
 
 
 class ResourceStatusUpdate(BaseModel):
-    status: Literal["active", "archived"]
+    status: Literal["active", "archived", "operational"]
 
 
 class AttachmentRead(BaseModel):
@@ -590,7 +590,7 @@ class EquipmentRead(EquipmentCreate):
     organization_id: int
     created_by_user_id: int
     created_at: datetime
-    status: Literal["active", "archived"]
+    status: Literal["active", "archived", "operational"]
 
 
 class TaskCreate(BaseModel):
@@ -936,3 +936,86 @@ class NotificationRead(BaseModel):
     details: dict[str, str]
     created_at: datetime
     read_at: datetime | None
+
+
+class PlateWellRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    coordinate: str
+    row_letter: str
+    col_number: int
+    role: str
+    sample_name: str
+    sample_id: int | None
+    replicate_group: str
+    standard_concentration: float | None
+    concentration_unit: str
+    dilution_factor: float
+    raw_value: float | None
+    corrected_value: float | None
+    calculated_concentration: float | None
+
+
+class MicroplateRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    organization_id: int
+    project_id: int | None
+    experiment_id: int | None
+    name: str
+    plate_format: str
+    rows: int
+    cols: int
+    description: str
+    assay_type: str
+    wavelength: str
+    measurement_unit: str
+    created_at: datetime
+    updated_at: datetime
+    wells: list[PlateWellRead]
+
+
+
+class ChemicalCompoundRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    organization_id: int
+    project_id: int | None = None
+    experiment_id: int | None = None
+    name: str
+    smiles: str
+    formula: str
+    molecular_weight: float
+    monoisotopic_mass: float
+    logp: float
+    hbd: int
+    hba: int
+    rotatable_bonds: int
+    tpsa: float
+    rule_of_five_violations: int
+    drug_likeness_score: float
+    ghs_hazard_codes: str
+    ghs_pictograms: str
+    svg_depiction: str
+    created_at: datetime
+
+
+class ChemicalAnalysisResult(BaseModel):
+    name: str
+    smiles: str
+    formula: str
+    molecular_weight: float
+    monoisotopic_mass: float
+    logp: float
+    hbd: int
+    hba: int
+    rotatable_bonds: int
+    tpsa: float
+    rule_of_five_violations: int
+    drug_likeness_score: float
+    ghs_hazard_codes: str
+    ghs_pictograms: str
+    svg_depiction: str

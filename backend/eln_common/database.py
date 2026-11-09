@@ -46,6 +46,10 @@ class Database:
             bind=self.engine, autoflush=False, expire_on_commit=False
         )
 
+    @property
+    def session_factory(self) -> sessionmaker[Session]:
+        return self._session_factory
+
     def assert_schema_is_current(self, service: str) -> None:
         if service not in MIGRATION_SERVICES:
             raise ValueError(f"Unknown database migration service: {service}")

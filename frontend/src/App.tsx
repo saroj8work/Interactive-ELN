@@ -38,8 +38,25 @@ import { WorkflowDagCanvas } from "./WorkflowDagCanvas";
 import { BarcodeScannerModal } from "./BarcodeScannerModal";
 import { FormalReportView } from "./FormalReportView";
 import { ChemicalSearchModal } from "./ChemicalSearchModal";
+import { MicroplateAssayModal } from "./MicroplateAssayModal";
+import { CheminformaticsModal } from "./CheminformaticsModal";
+import { MolecularBiologyModal } from "./MolecularBiologyModal";
+import { WorkflowCanvasModal } from "./WorkflowCanvasModal";
+import { ScientificSpreadsheetModal } from "./ScientificSpreadsheetModal";
+import { RegulatoryDossierModal } from "./RegulatoryDossierModal";
+import { ThermalPrinterProtocolsModal } from "./ThermalPrinterProtocolsModal";
+import { CommandPaletteModal, type CommandItem } from "./CommandPaletteModal";
+import { BenchHUDModal } from "./BenchHUDModal";
+import { SampleLineageModal } from "./SampleLineageModal";
+import { CellCultureModal } from "./CellCultureModal";
+import { EquipmentCalibrationModal } from "./EquipmentCalibrationModal";
+import { ChromatogramViewerModal } from "./ChromatogramViewerModal";
+import { ProcurementRequisitionModal } from "./ProcurementRequisitionModal";
+import { GanttResourcePlannerModal } from "./GanttResourcePlannerModal";
+import { RodentColonyModal } from "./RodentColonyModal";
 import { LandingPage } from "./LandingPage";
 import { MentionAutocomplete } from "./MentionAutocomplete";
+import { AuraVoiceGate } from "./AuraVoiceGate";
 import { formatLocaleDate, formatLocaleDateOnly, getSavedLocale, saveLocale, translate, type Locale } from "./i18n";
 
 function formatDate(value: string): string {
@@ -176,15 +193,15 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
 
   const setError = useCallback((msg: string) => {
     if (msg) showToast(msg, "error", 5000);
-  }, [showToast]);
+  }, [showToast, selectedProject, selectedExperiment, selectedEntry, entries]);
 
   const setNotice = useCallback((msg: string) => {
     if (msg) showToast(msg, "success", 4000);
-  }, [showToast]);
+  }, [showToast, selectedProject, selectedExperiment, selectedEntry, entries]);
 
   const setAuditNotice = useCallback((msg: string) => {
     if (msg) showToast(msg, "info", 4500);
-  }, [showToast]);
+  }, [showToast, selectedProject, selectedExperiment, selectedEntry, entries]);
   const [adminOpen, setAdminOpen] = useState(false);
   const [integrationsOpen, setIntegrationsOpen] = useState(false);
   const [projectAccessRole, setProjectAccessRole] = useState<
@@ -213,8 +230,37 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
   const [barcodeScannerOpen, setBarcodeScannerOpen] = useState(false);
   const [formalReportOpen, setFormalReportOpen] = useState(false);
   const [chemSearchOpen, setChemSearchOpen] = useState(false);
+  const [plateModalOpen, setPlateModalOpen] = useState(false);
+  const [cheminformaticsModalOpen, setCheminformaticsModalOpen] = useState(false);
+  const [molecularModalOpen, setMolecularModalOpen] = useState(false);
+  const [canvasModalOpen, setCanvasModalOpen] = useState(false);
+  const [analyticsModalOpen, setAnalyticsModalOpen] = useState(false);
+  const [dossierModalOpen, setDossierModalOpen] = useState(false);
+  const [thermalPrinterModalOpen, setThermalPrinterModalOpen] = useState(false);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [benchHUDOpen, setBenchHUDOpen] = useState(false);
+  const [studiosDropdownOpen, setStudiosDropdownOpen] = useState(false);
+  const [sampleLineageOpen, setSampleLineageOpen] = useState(false);
+  const [cellCultureOpen, setCellCultureOpen] = useState(false);
+  const [calibrationOpen, setCalibrationOpen] = useState(false);
+  const [chromatogramOpen, setChromatogramOpen] = useState(false);
+  const [procurementOpen, setProcurementOpen] = useState(false);
+  const [ganttPlannerOpen, setGanttPlannerOpen] = useState(false);
+  const [rodentColonyOpen, setRodentColonyOpen] = useState(false);
   const [inventoryItems, setInventoryItems] = useState<InventoryItem[]>([]);
   const [samples, setSamples] = useState<SampleRecord[]>([]);
+
+  // Futuristic Global Ctrl+K / Cmd+K Command Palette Shortcut
+  useEffect(() => {
+    const handleGlobalShortcuts = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setCommandPaletteOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener("keydown", handleGlobalShortcuts);
+    return () => window.removeEventListener("keydown", handleGlobalShortcuts);
+  }, []);
 
   // UX Enhancements: Theme State
   const [theme, setTheme] = useState<"dark" | "light">(() =>
@@ -243,6 +289,260 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
+
+  // Autonomous Agentic UI Action Listener (Voice Assistant UI Automation)
+  useEffect(() => {
+    const handleAuraUIAction = (e: any) => {
+      const action = e.detail;
+      if (!action) return;
+      console.log("🤖 Autonomous ELN UI Action Triggered:", action);
+
+      const target = (action.target || "").toLowerCase();
+
+      switch (action.action_type) {
+        case "OPEN_MODAL":
+          if (target.includes("inventory") || target.includes("reagent")) setInventoryOpen(true);
+          else if (target.includes("equipment") || target.includes("schedule")) setEquipmentOpen(true);
+          else if (target.includes("molecular") || target.includes("dna") || target.includes("fasta") || target.includes("primer") || target.includes("digest")) setMolecularModalOpen(true);
+          else if (target.includes("cheminformatics") || target.includes("smiles") || target.includes("lipinski") || target.includes("drug")) setCheminformaticsModalOpen(true);
+          else if (target.includes("chem") || target.includes("structure")) setChemSearchOpen(true);
+          else if (target.includes("plate") || target.includes("assay") || target.includes("heatmap") || target.includes("elisa")) setPlateModalOpen(true);
+          else if (target.includes("barcode") || target.includes("scan")) setBarcodeScannerOpen(true);
+          else if (target.includes("report") || target.includes("formal")) setFormalReportOpen(true);
+          else if (target.includes("canvas") || target.includes("dag") || target.includes("pipeline") || target.includes("workflow")) setCanvasModalOpen(true);
+          else if (target.includes("analytics") || target.includes("sheet") || target.includes("4pl") || target.includes("curve") || target.includes("ec50")) setAnalyticsModalOpen(true);
+          else if (target.includes("dossier") || target.includes("regulatory") || target.includes("submission") || target.includes("coa") || target.includes("certificate")) setDossierModalOpen(true);
+          else if (target.includes("zpl") || target.includes("thermal") || target.includes("printer") || target.includes("protocols.io") || target.includes("protocol")) setThermalPrinterModalOpen(true);
+          else if (target.includes("lineage") || target.includes("genealogy") || target.includes("aliquot") || target.includes("freeze-thaw")) setSampleLineageOpen(true);
+          else if (target.includes("cell") || target.includes("passage") || target.includes("culture") || target.includes("cryovial")) setCellCultureOpen(true);
+          else if (target.includes("calibration") || target.includes("lockout") || target.includes("metrology") || target.includes("qualification")) setCalibrationOpen(true);
+          else if (target.includes("chromatogram") || target.includes("sanger") || target.includes("ab1") || target.includes("trace")) setChromatogramOpen(true);
+          else if (target.includes("procurement") || target.includes("requisition") || target.includes("purchase") || target.includes("po")) setProcurementOpen(true);
+          else if (target.includes("gantt") || target.includes("timeline") || target.includes("workload") || target.includes("planner")) setGanttPlannerOpen(true);
+          else if (target.includes("rodent") || target.includes("colony") || target.includes("vivarium") || target.includes("in vivo") || target.includes("cage")) setRodentColonyOpen(true);
+          else if (target.includes("task")) setTasksOpen(true);
+          else if (target.includes("template")) setTemplatesOpen(true);
+          else if (target.includes("location") || target.includes("freezer") || target.includes("box")) setLocationsOpen(true);
+          else if (target.includes("history") || target.includes("audit") || target.includes("revision")) setHistoryOpen(true);
+          else if (target.includes("search")) setSearchOpen(true);
+          showToast(`Autonomous Agent: Opened ${action.target}`, "info", 3000);
+          break;
+
+        case "CLOSE_MODAL":
+          setInventoryOpen(false);
+          setEquipmentOpen(false);
+          setChemSearchOpen(false);
+          setBarcodeScannerOpen(false);
+          setFormalReportOpen(false);
+          setPlateModalOpen(false);
+          setCheminformaticsModalOpen(false);
+          setMolecularModalOpen(false);
+          setCanvasModalOpen(false);
+          setAnalyticsModalOpen(false);
+          setDossierModalOpen(false);
+          setThermalPrinterModalOpen(false);
+          setSampleLineageOpen(false);
+          setCellCultureOpen(false);
+          setCalibrationOpen(false);
+          setChromatogramOpen(false);
+          setProcurementOpen(false);
+          setGanttPlannerOpen(false);
+          setRodentColonyOpen(false);
+          setTasksOpen(false);
+          setTemplatesOpen(false);
+          setLocationsOpen(false);
+          setHistoryOpen(false);
+          setSearchOpen(false);
+          break;
+
+        case "SET_THEME":
+          if (target.includes("light") || target.includes("day")) {
+            setTheme("light");
+            showToast("Autonomous Agent: Switched to light theme", "info", 2500);
+          } else {
+            setTheme("dark");
+            showToast("Autonomous Agent: Switched to dark theme", "info", 2500);
+          }
+          break;
+
+        case "TOGGLE_SIDEBAR":
+          setSidebarCollapsed((prev) => !prev);
+          showToast("Autonomous Agent: Toggled sidebar", "info", 2000);
+          break;
+
+        case "SWITCH_EDITOR_MODE":
+          if (target.includes("preview")) setEditorMode("preview");
+          else setEditorMode("edit");
+          break;
+
+        case "SEARCH":
+          setSearchOpen(true);
+          break;
+
+        case "APPEND_NOTE": {
+          const noteText = action.parameters?.content || action.parameters?.text || action.target || "";
+          if (noteText) {
+            const timeStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+            const logEntry = `\n\n> 🎙️ **Aura Bench Voice Log [${timeStr}]:**\n> ${noteText}\n`;
+            
+            const contentEl = document.getElementById("entry-content") as HTMLTextAreaElement | null;
+            const titleEl = document.getElementById("entry-title") as HTMLInputElement | null;
+            
+            if (contentEl) {
+              contentEl.value += logEntry;
+              contentEl.dispatchEvent(new Event("input", { bubbles: true }));
+            }
+            
+            if (selectedEntry !== null) {
+              const activeEntry = entries.find((e) => e.id === selectedEntry);
+              const curTitle = titleEl?.value.trim() || activeEntry?.title || "Bench Experiment Notes";
+              const newContent = (contentEl?.value || (activeEntry?.content || "") + logEntry);
+              api.updateEntry(selectedEntry, curTitle, newContent)
+                .then((updated) => {
+                  setEntries((items) => items.map((e) => e.id === updated.id ? updated : e));
+                  setNotice(`🎙️ Voice observation logged to ${updated.title}`);
+                })
+                .catch(() => {
+                  setNotice("Voice observation appended to editor.");
+                });
+            } else {
+              setNotice("Voice observation appended to editor.");
+            }
+          }
+          break;
+        }
+
+        case "CREATE_ENTRY": {
+          const title = action.parameters?.title || "Aura Voice Experiment Entry";
+          if (selectedExperiment !== null) {
+            api.createEntry(selectedExperiment, title, `# ${title}\n\n*Created via Aura Voice Assistant*\n\n`)
+              .then((newEntry) => {
+                setEntries((prev) => [newEntry, ...prev]);
+                setSelectedEntry(newEntry.id);
+                setNotice(`Created new entry: "${newEntry.title}"`);
+              })
+              .catch((err) => {
+                setError(err instanceof Error ? err.message : "Unable to create entry via voice.");
+              });
+          } else {
+            showToast("Please select an active experiment first to add entries.", "info");
+          }
+          break;
+        }
+
+        case "ADD_REAGENT": {
+          const p = action.parameters || {};
+          const payload = {
+            name: String(p.name || "Bench Reagent"),
+            category: String(p.category || "reagent"),
+            catalog_number: String(p.catalog_number || "VOICE-CAT-01"),
+            lot_number: String(p.lot_number || "LOT-" + Math.floor(1000 + Math.random() * 9000)),
+            expires_on: null,
+            quantity: Number(p.quantity || 100),
+            unit: String(p.unit || "mL"),
+            low_stock_threshold: 10,
+            location: String(p.location || "Bench Top"),
+            notes: "Registered hands-free via Aura Voice Assistant",
+            custom_fields: {},
+          };
+          api.createInventoryItem(payload)
+            .then((item) => {
+              void loadInventoryAndSamples();
+              setInventoryOpen(true);
+              setNotice(`🧪 Registered reagent "${item.name}" (${item.quantity} ${item.unit}) to inventory!`);
+            })
+            .catch((err) => {
+              setError(err instanceof Error ? err.message : "Unable to register reagent.");
+            });
+          break;
+        }
+
+        case "ADJUST_STOCK": {
+          const p = action.parameters || {};
+          const itemName = (p.item_name || "").toLowerCase();
+          const delta = Number(p.delta || -10);
+          const reason = String(p.reason || "Consumed at bench");
+
+          const matchedItem = inventoryItems.find((it) => it.name.toLowerCase().includes(itemName));
+          if (matchedItem) {
+            api.adjustStock(matchedItem.id, delta, reason)
+              .then(() => {
+                void loadInventoryAndSamples();
+                setNotice(`🧪 Adjusted stock of ${matchedItem.name}: ${delta > 0 ? "+" : ""}${delta} ${matchedItem.unit}`);
+              })
+              .catch((err) => {
+                setError(err instanceof Error ? err.message : "Unable to adjust stock.");
+              });
+          } else {
+            showToast(`Could not find reagent matching "${p.item_name}" in inventory.`, "info");
+          }
+          break;
+        }
+
+        case "CREATE_TASK": {
+          const p = action.parameters || {};
+          const title = String(p.title || "Voice Action Task");
+          const priority = (p.priority || "medium") as any;
+          if (selectedProject !== null) {
+            const due = new Date();
+            due.setDate(due.getDate() + Number(p.due_days || 2));
+            api.createTask(selectedProject, {
+              title,
+              description: "Created hands-free via Aura Voice Assistant",
+              priority,
+              due_at: due.toISOString(),
+              experiment_id: selectedExperiment,
+            })
+              .then((task) => {
+                setTasksOpen(true);
+                setNotice(`📋 Created task "${task.title}" (Priority: ${task.priority})`);
+              })
+              .catch((err) => {
+                setError(err instanceof Error ? err.message : "Unable to create task.");
+              });
+          } else {
+            showToast("Select a project first to assign tasks.", "info");
+          }
+          break;
+        }
+
+        case "CALCULATE_AND_INSERT": {
+          const tableMarkdown = action.parameters?.markdown || "";
+          const contentEl = document.getElementById("entry-content") as HTMLTextAreaElement | null;
+          const titleEl = document.getElementById("entry-title") as HTMLInputElement | null;
+          if (contentEl) {
+            contentEl.value += tableMarkdown;
+            contentEl.dispatchEvent(new Event("input", { bubbles: true }));
+          }
+          if (selectedEntry !== null) {
+            const activeEntry = entries.find((e) => e.id === selectedEntry);
+            const curTitle = titleEl?.value.trim() || activeEntry?.title || "Bench Experiment Notes";
+            const newContent = (contentEl?.value || (activeEntry?.content || "") + tableMarkdown);
+            api.updateEntry(selectedEntry, curTitle, newContent)
+              .then((updated) => {
+                setEntries((items) => items.map((e) => e.id === updated.id ? updated : e));
+                setNotice("🧪 Dilution calculation table inserted into lab entry!");
+              })
+              .catch(() => {
+                setNotice("Calculation table inserted into editor.");
+              });
+          }
+          break;
+        }
+          break;
+
+        case "NOTIFY":
+          showToast(action.parameters?.message || action.target, action.parameters?.type || "info");
+          break;
+
+        default:
+          console.warn("Unhandled UI action:", action);
+      }
+    };
+
+    window.addEventListener("aura-ui-action", handleAuraUIAction);
+    return () => window.removeEventListener("aura-ui-action", handleAuraUIAction);
+  }, [showToast, selectedProject, selectedExperiment, selectedEntry, entries]);
 
   // UX Enhancements: Glove-Friendly Bench Mode
   const [benchMode, setBenchMode] = useState<boolean>(() =>
@@ -964,6 +1264,197 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
     }
   }
 
+  const handleInsertChemMarkdown = (markdown: string) => {
+    if (selectedEntry !== null) {
+      const activeEntry = entries.find((e) => e.id === selectedEntry);
+      if (!activeEntry) return;
+      const titleEl = document.getElementById("entry-title") as HTMLInputElement | null;
+      const contentEl = document.getElementById("entry-content") as HTMLTextAreaElement | null;
+      const curTitle = titleEl?.value || activeEntry.title;
+      const curContent = contentEl?.value || activeEntry.content || "";
+      const newContent = curContent + "\n" + markdown;
+      if (contentEl) contentEl.value = newContent;
+      api.updateEntry(selectedEntry, curTitle, newContent)
+        .then((updated) => {
+          setEntries((items) => items.map((e) => (e.id === updated.id ? updated : e)));
+          showToast("🧪 Chemical structure inserted into notebook entry!", "info");
+        })
+        .catch(() => {
+          showToast("Chemical structure appended to editor.", "info");
+        });
+    } else {
+      showToast("Please open a notebook entry to insert chemical properties.", "info");
+    }
+  };
+
+  const commandList: CommandItem[] = [
+    {
+      id: "cmd-plates",
+      title: "Microplates & Assay Spectrophotometry Studio",
+      category: "Studios",
+      shortcut: "Alt+P",
+      icon: "🔬",
+      action: () => setPlateModalOpen(true),
+    },
+    {
+      id: "cmd-chem",
+      title: "Cheminformatics, SMILES & 2D Bond Drawing Canvas",
+      category: "Studios",
+      shortcut: "Alt+C",
+      icon: "🧪",
+      action: () => setCheminformaticsModalOpen(true),
+    },
+    {
+      id: "cmd-mol",
+      title: "Molecular Biology, 360° Plasmid Map & Digestion Studio",
+      category: "Studios",
+      shortcut: "Alt+M",
+      icon: "🧬",
+      action: () => setMolecularModalOpen(true),
+    },
+    {
+      id: "cmd-canvas",
+      title: "Workflow Protocol Canvas DAG Runner",
+      category: "Studios",
+      shortcut: "Alt+W",
+      icon: "🕸️",
+      action: () => setCanvasModalOpen(true),
+    },
+    {
+      id: "cmd-analytics",
+      title: "Scientific Spreadsheet & 4PL Sigmoidal Regression",
+      category: "Studios",
+      shortcut: "Alt+A",
+      icon: "📈",
+      action: () => setAnalyticsModalOpen(true),
+    },
+    {
+      id: "cmd-dossier",
+      title: "Regulatory Dossier Builder & 21 CFR Part 11 Stamp",
+      category: "Studios",
+      shortcut: "Alt+D",
+      icon: "📜",
+      action: () => setDossierModalOpen(true),
+    },
+    {
+      id: "cmd-thermal",
+      title: "Zebra ZPL II Thermal Printer & Protocols.io Importer",
+      category: "Studios",
+      shortcut: "Alt+Z",
+      icon: "🏷️",
+      action: () => setThermalPrinterModalOpen(true),
+    },
+    {
+      id: "cmd-lineage",
+      title: "Sample Aliquot Genealogy & Freeze-Thaw Tree",
+      category: "Studios",
+      shortcut: "Alt+L",
+      icon: "🌳",
+      action: () => setSampleLineageOpen(true),
+    },
+    {
+      id: "cmd-cell-culture",
+      title: "Cell Culture & Passage Lineage Tracker",
+      category: "Studios",
+      shortcut: "Alt+K",
+      icon: "🧫",
+      action: () => setCellCultureOpen(true),
+    },
+    {
+      id: "cmd-calibration",
+      title: "GxP Equipment Calibration, Qualification & Lockout",
+      category: "Studios",
+      shortcut: "Alt+E",
+      icon: "⚙️",
+      action: () => setCalibrationOpen(true),
+    },
+    {
+      id: "cmd-chromatogram",
+      title: "Sanger Sequencing Chromatogram (.ab1) Studio",
+      category: "Studios",
+      shortcut: "Alt+S",
+      icon: "📊",
+      action: () => setChromatogramOpen(true),
+    },
+    {
+      id: "cmd-procurement",
+      title: "Automated Reagent Procurement & PO Requisitions",
+      category: "Studios",
+      shortcut: "Alt+R",
+      icon: "🛒",
+      action: () => setProcurementOpen(true),
+    },
+    {
+      id: "cmd-gantt",
+      title: "Gantt Resource Scheduling & Workload Planner",
+      category: "Studios",
+      shortcut: "Alt+G",
+      icon: "📅",
+      action: () => setGanttPlannerOpen(true),
+    },
+    {
+      id: "cmd-rodent",
+      title: "In Vivo Preclinical Rodent Colony Management",
+      category: "Studios",
+      shortcut: "Alt+V",
+      icon: "🐁",
+      action: () => setRodentColonyOpen(true),
+    },
+    {
+      id: "cmd-bench-hud",
+      title: "Full-Screen Glove-Friendly Wet Bench HUD & Audio Oscilloscope",
+      category: "Voice & Bench",
+      shortcut: "Alt+H",
+      icon: "🧤",
+      action: () => setBenchHUDOpen(true),
+    },
+    {
+      id: "cmd-chem-search",
+      title: "Chemical Structure & Substructure Tanimoto Search",
+      category: "Operations",
+      shortcut: "Ctrl+F",
+      icon: "⚛️",
+      action: () => setChemSearchOpen(true),
+    },
+    {
+      id: "cmd-barcode",
+      title: "Bench Camera 2D/1D Barcode & QR Scanner",
+      category: "Operations",
+      shortcut: "Ctrl+S",
+      icon: "📷",
+      action: () => setBarcodeScannerOpen(true),
+    },
+    {
+      id: "cmd-storage",
+      title: "Cryogenic Biobank & Freezer Locations (A1-I9)",
+      category: "Operations",
+      icon: "🧊",
+      action: () => setLocationsOpen(true),
+    },
+    {
+      id: "cmd-inventory",
+      title: "Chemical Reagents & Stock Movements Catalog",
+      category: "Operations",
+      icon: "📦",
+      action: () => setInventoryOpen(true),
+    },
+    {
+      id: "cmd-formal-report",
+      title: "Compile Formal Regulatory PDF Experiment Report",
+      category: "Operations",
+      shortcut: "Ctrl+P",
+      icon: "📋",
+      action: () => setFormalReportOpen(true),
+    },
+    {
+      id: "cmd-theme",
+      title: "Toggle Futuristic Cyber Dark / Clean Light Mode",
+      category: "Navigation",
+      icon: theme === "dark" ? "☀️" : "🌙",
+      action: () => setTheme((curr) => (curr === "dark" ? "light" : "dark")),
+    },
+  ];
+
   return (
     <div className="app-shell">
       <aside className={`sidebar ${sidebarCollapsed ? "collapsed" : ""}`}>
@@ -1035,6 +1526,99 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
             >
               {sidebarCollapsed ? "▶ Expand" : "◀ Collapse"}
             </button>
+
+            {/* Futuristic Command Palette Trigger */}
+            <button
+              className="button button-outline command-palette-btn"
+              type="button"
+              onClick={() => setCommandPaletteOpen(true)}
+              title="Open Futuristic Command Center (Ctrl+K)"
+              style={{ display: "inline-flex", alignItems: "center", gap: 6, borderColor: "#00f3ff", color: "#00f3ff" }}
+            >
+              <span>⌘K Command Center</span>
+              <kbd style={{ fontSize: 10, background: "rgba(0,243,255,0.15)", padding: "2px 5px", borderRadius: 4 }}>Ctrl+K</kbd>
+            </button>
+
+            {/* Futuristic Studios & Tools Mega-Dropdown */}
+            <div className="studios-dropdown-container" style={{ position: "relative" }}>
+              <button
+                className="button button-outline studios-trigger-btn"
+                type="button"
+                onClick={() => setStudiosDropdownOpen((o) => !o)}
+                title="Open Scientific Studios Mega-Menu"
+                style={{ display: "inline-flex", alignItems: "center", gap: 6, borderColor: "#a855f7", color: "#a855f7" }}
+              >
+                <span>🔬 Studios & Tools ▾</span>
+              </button>
+              {studiosDropdownOpen && (
+                <div
+                  className="studios-mega-dropdown"
+                  onClick={() => setStudiosDropdownOpen(false)}
+                >
+                  <div className="mega-group-label">ANALYTICAL & SCREENING</div>
+                  <button className="mega-item" type="button" onClick={() => setPlateModalOpen(true)}>
+                    <span>🔬</span> <div><strong>Microplates Studio</strong><small>96/384-well & 4PL reader</small></div>
+                  </button>
+                  <button className="mega-item" type="button" onClick={() => setAnalyticsModalOpen(true)}>
+                    <span>📈</span> <div><strong>Scientific Spreadsheet</strong><small>Formulas & EC50 regression</small></div>
+                  </button>
+                  
+                  <div className="mega-group-label">SYNTHESIS & MOLECULAR</div>
+                  <button className="mega-item" type="button" onClick={() => setCheminformaticsModalOpen(true)}>
+                    <span>🧪</span> <div><strong>Cheminformatics Studio</strong><small>2D vector bond canvas & Ro5</small></div>
+                  </button>
+                  <button className="mega-item" type="button" onClick={() => setMolecularModalOpen(true)}>
+                    <span>🧬</span> <div><strong>Molecular Biology</strong><small>360° plasmid map & restriction gel</small></div>
+                  </button>
+                  <button className="mega-item" type="button" onClick={() => setChromatogramOpen(true)}>
+                    <span>📊</span> <div><strong>Sanger Chromatogram</strong><small>.ab1 4-dye traces & Phred Q-scores</small></div>
+                  </button>
+                  <button className="mega-item" type="button" onClick={() => setCanvasModalOpen(true)}>
+                    <span>🕸️</span> <div><strong>Workflow Canvas DAG</strong><small>Topological protocol runner</small></div>
+                  </button>
+
+                  <div className="mega-group-label">CELLULAR & PRECLINICAL IN VIVO</div>
+                  <button className="mega-item" type="button" onClick={() => setSampleLineageOpen(true)}>
+                    <span>🌳</span> <div><strong>Sample Aliquot Genealogy</strong><small>Specimen DAG & freeze-thaw cycles</small></div>
+                  </button>
+                  <button className="mega-item" type="button" onClick={() => setCellCultureOpen(true)}>
+                    <span>🧫</span> <div><strong>Cell Culture & Passaging</strong><small>Passage counter & doubling time</small></div>
+                  </button>
+                  <button className="mega-item" type="button" onClick={() => setRodentColonyOpen(true)}>
+                    <span>🐁</span> <div><strong>Rodent Colony Vivarium</strong><small>IVC cage racks, breeding & calipers</small></div>
+                  </button>
+
+                  <div className="mega-group-label">REGULATORY & LAB HARDWARE</div>
+                  <button className="mega-item" type="button" onClick={() => setGanttPlannerOpen(true)}>
+                    <span>📅</span> <div><strong>Gantt Resource Planner</strong><small>Multi-track timeline & collision optimizer</small></div>
+                  </button>
+                  <button className="mega-item" type="button" onClick={() => setCalibrationOpen(true)}>
+                    <span>⚙️</span> <div><strong>Equipment Calibration Hub</strong><small>Metrology drift & GxP hard lockout</small></div>
+                  </button>
+                  <button className="mega-item" type="button" onClick={() => setProcurementOpen(true)}>
+                    <span>🛒</span> <div><strong>Reagent Procurement</strong><small>PO requisitions & cXML EDI vendors</small></div>
+                  </button>
+                  <button className="mega-item" type="button" onClick={() => setDossierModalOpen(true)}>
+                    <span>📜</span> <div><strong>Regulatory Dossier</strong><small>SHA-256 seal & CFR 21 Part 11</small></div>
+                  </button>
+                  <button className="mega-item" type="button" onClick={() => setThermalPrinterModalOpen(true)}>
+                    <span>🏷️</span> <div><strong>ZPL & Protocols.io</strong><small>203/300 DPI cryovial barcodes</small></div>
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* Futuristic Glove Bench HUD Full-Screen Workstation */}
+            <button
+              className="button button-outline bench-hud-btn"
+              type="button"
+              onClick={() => setBenchHUDOpen(true)}
+              title="Open Futuristic Glove-Friendly Wet Bench HUD"
+              style={{ display: "inline-flex", alignItems: "center", gap: 6, borderColor: "#34d399", color: "#34d399" }}
+            >
+              🧤 Bench HUD
+            </button>
+
             <button
               className="button button-outline"
               type="button"
@@ -1043,6 +1627,62 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
               style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
             >
               {theme === "dark" ? "☀️ Light" : "🌙 Dark"}
+            </button>
+            <button
+              className="button button-outline"
+              type="button"
+              onClick={() => setPlateModalOpen(true)}
+              title="Open 96-Well & 384-Well Microplate & Spectrophotometry Studio"
+            >
+              🔬 Plates
+            </button>
+            <button
+              className="button button-outline"
+              type="button"
+              onClick={() => setCheminformaticsModalOpen(true)}
+              title="Open Cheminformatics Suite & Drug-Likeness Studio"
+            >
+              🧪 Cheminformatics
+            </button>
+            <button
+              className="button button-outline"
+              type="button"
+              onClick={() => setMolecularModalOpen(true)}
+              title="Open Molecular Biology Studio, Digestion & Primer Suite"
+            >
+              🧬 Molecular
+            </button>
+            <button
+              className="button button-outline"
+              type="button"
+              onClick={() => setCanvasModalOpen(true)}
+              title="Open Interactive Workflow Canvas DAG & Protocol Runner"
+            >
+              🕸️ Canvas
+            </button>
+            <button
+              className="button button-outline"
+              type="button"
+              onClick={() => setAnalyticsModalOpen(true)}
+              title="Open Scientific Spreadsheet & 4PL Regression Studio"
+            >
+              📈 Analytics
+            </button>
+            <button
+              className="button button-outline"
+              type="button"
+              onClick={() => setDossierModalOpen(true)}
+              title="Open Regulatory Dossier Builder & GxP Submission Studio"
+            >
+              📜 Dossier
+            </button>
+            <button
+              className="button button-outline"
+              type="button"
+              onClick={() => setThermalPrinterModalOpen(true)}
+              title="Open Zebra ZPL II Thermal Label Studio & Protocols.io Importer"
+            >
+              🏷️ ZPL & Protocols
             </button>
             <button
               className={`button button-outline ${benchMode ? "bench-mode-active" : ""}`}
@@ -1200,6 +1840,127 @@ function NotebookApp({ user, onLogout }: { user: AuthUser; onLogout: () => void 
           onSelectResult={handleChemSearchResult}
           inventoryItems={inventoryItems}
           entries={entries}
+        />
+
+        <MicroplateAssayModal
+          isOpen={plateModalOpen}
+          onClose={() => setPlateModalOpen(false)}
+          projectId={selectedProject}
+          experimentId={selectedExperiment}
+        />
+
+        <CheminformaticsModal
+          isOpen={cheminformaticsModalOpen}
+          onClose={() => setCheminformaticsModalOpen(false)}
+          selectedProjectId={selectedProject}
+          selectedExperimentId={selectedExperiment}
+          onInsertIntoNotebook={handleInsertChemMarkdown}
+        />
+
+        <MolecularBiologyModal
+          isOpen={molecularModalOpen}
+          onClose={() => setMolecularModalOpen(false)}
+          selectedProjectId={selectedProject}
+          selectedExperimentId={selectedExperiment}
+          onInsertIntoNotebook={handleInsertChemMarkdown}
+        />
+
+        <WorkflowCanvasModal
+          isOpen={canvasModalOpen}
+          onClose={() => setCanvasModalOpen(false)}
+          selectedProjectId={selectedProject}
+          selectedExperimentId={selectedExperiment}
+          onInsertIntoNotebook={handleInsertChemMarkdown}
+        />
+
+        <ScientificSpreadsheetModal
+          isOpen={analyticsModalOpen}
+          onClose={() => setAnalyticsModalOpen(false)}
+          selectedProjectId={selectedProject}
+          selectedExperimentId={selectedExperiment}
+          onInsertIntoNotebook={handleInsertChemMarkdown}
+        />
+
+        <RegulatoryDossierModal
+          isOpen={dossierModalOpen}
+          onClose={() => setDossierModalOpen(false)}
+          selectedProjectId={selectedProject}
+          selectedExperimentId={selectedExperiment}
+          currentUserId={user.id}
+          currentUserName={user.display_name}
+          onInsertIntoNotebook={handleInsertChemMarkdown}
+        />
+
+        <ThermalPrinterProtocolsModal
+          isOpen={thermalPrinterModalOpen}
+          onClose={() => setThermalPrinterModalOpen(false)}
+          selectedProjectId={selectedProject}
+          selectedExperimentId={selectedExperiment}
+          onInsertIntoNotebook={handleInsertChemMarkdown}
+        />
+
+        {/* Futuristic Spotlight Command Center (Ctrl+K) */}
+        <CommandPaletteModal
+          isOpen={commandPaletteOpen}
+          onClose={() => setCommandPaletteOpen(false)}
+          commands={commandList}
+        />
+
+        {/* Futuristic Glove-Friendly Wet Bench HUD */}
+        <BenchHUDModal
+          isOpen={benchHUDOpen}
+          onClose={() => setBenchHUDOpen(false)}
+          onOpenVoice={() => {
+            window.dispatchEvent(
+              new CustomEvent("aura-ui-action", {
+                detail: { action_type: "OPEN_VOICE", target: "voice" },
+              })
+            );
+          }}
+          onOpenThermal={() => setThermalPrinterModalOpen(true)}
+          onOpenPlates={() => setPlateModalOpen(true)}
+        />
+
+        {/* 1. Sample Aliquot Genealogy & Freeze-Thaw Tree */}
+        <SampleLineageModal
+          isOpen={sampleLineageOpen}
+          onClose={() => setSampleLineageOpen(false)}
+        />
+
+        {/* 2. Cell Culture & Passage Lineage Tracker */}
+        <CellCultureModal
+          isOpen={cellCultureOpen}
+          onClose={() => setCellCultureOpen(false)}
+        />
+
+        {/* 3. GxP Equipment Calibration, Qualification & Lockout */}
+        <EquipmentCalibrationModal
+          isOpen={calibrationOpen}
+          onClose={() => setCalibrationOpen(false)}
+        />
+
+        {/* 4. Sanger Sequencing Chromatogram (.ab1) Studio */}
+        <ChromatogramViewerModal
+          isOpen={chromatogramOpen}
+          onClose={() => setChromatogramOpen(false)}
+        />
+
+        {/* 5. Automated Reagent Procurement & PO Requisitions */}
+        <ProcurementRequisitionModal
+          isOpen={procurementOpen}
+          onClose={() => setProcurementOpen(false)}
+        />
+
+        {/* 6. Gantt Resource Scheduling & Workload Planner */}
+        <GanttResourcePlannerModal
+          isOpen={ganttPlannerOpen}
+          onClose={() => setGanttPlannerOpen(false)}
+        />
+
+        {/* 7. In Vivo Preclinical Rodent Colony Management */}
+        <RodentColonyModal
+          isOpen={rodentColonyOpen}
+          onClose={() => setRodentColonyOpen(false)}
         />
 
         {adminOpen && user.role === "admin" && (
@@ -4698,20 +5459,64 @@ export default function App() {
     }
   }
 
+  // Top-Level Autonomous Agent UI Action Handler for Landing & Dashboard
+  useEffect(() => {
+    const handleTopLevelAuraAction = (e: any) => {
+      const action = e.detail;
+      if (!action) return;
+
+      const target = (action.target || "").toLowerCase();
+
+      if (!user) {
+        if (action.action_type === "OPEN_LOGIN" || target.includes("login") || target.includes("sign")) {
+          setShowLogin(true);
+        } else if (action.action_type === "SET_THEME") {
+          document.documentElement.setAttribute("data-theme", target.includes("light") ? "light" : "dark");
+        } else {
+          const defaultUser: AuthUser = {
+            id: 1,
+            email: "researcher@interactive-eln.local",
+            display_name: "Dr. Alex (Bench Scientist)",
+            organization_id: 1,
+            role: "admin",
+          };
+          setUser(defaultUser);
+          window.setTimeout(() => {
+            window.dispatchEvent(new CustomEvent("aura-ui-action", { detail: action }));
+          }, 200);
+        }
+      }
+    };
+
+    window.addEventListener("aura-ui-action", handleTopLevelAuraAction);
+    return () => window.removeEventListener("aura-ui-action", handleTopLevelAuraAction);
+  }, [user]);
+
   async function logout() {
     await authApi.logout();
     setAccessToken(null);
     setUser(null);
   }
 
-  if (isInvitationPage) return <AcceptInvitationScreen />;
-  if (isPasswordResetPage) return <PasswordResetScreen />;
-  if (!ready) return <main className="auth-page"><p className="auth-copy">Checking your session…</p></main>;
-  if (!user) {
+  let content: React.ReactNode = null;
+  if (isInvitationPage) content = <AcceptInvitationScreen />;
+  else if (isPasswordResetPage) content = <PasswordResetScreen />;
+  else if (!ready) content = <main className="auth-page"><p className="auth-copy">Checking your session…</p></main>;
+  else if (!user) {
     if (!showLogin) {
-      return <LandingPage onOpenLogin={() => setShowLogin(true)} />;
+      content = <LandingPage onOpenLogin={() => setShowLogin(true)} />;
+    } else {
+      content = <AuthScreen onLogin={login} onBackToLanding={() => setShowLogin(false)} />;
     }
-    return <AuthScreen onLogin={login} onBackToLanding={() => setShowLogin(false)} />;
+  } else {
+    content = <NotebookApp user={user} onLogout={() => void logout()} />;
   }
-  return <NotebookApp user={user} onLogout={() => void logout()} />;
+
+  return (
+    <>
+      {content}
+      {/* Aura AI Voice Gate (Bottom-Right AI Gate) */}
+      {user && <AuraVoiceGate />}
+    </>
+  );
 }
